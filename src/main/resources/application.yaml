@@ -1,3 +1,81 @@
 spring:
   application:
     name: desk-resolver
+
+  # ---------------------------------------------------------------------------
+  # Database
+  # ---------------------------------------------------------------------------
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ITSoftwareSupport}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      schema: desk_resolver_db
+
+  # ---------------------------------------------------------------------------
+  # Flyway
+  # ---------------------------------------------------------------------------
+  flyway:
+    schemas: desk_resolver_db
+    default-schema: desk_resolver_db
+    locations: classpath:db/migration
+
+  # ---------------------------------------------------------------------------
+  # JPA / Hibernate
+  # ---------------------------------------------------------------------------
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+server:
+  port: 9092
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+app:
+  security:
+    jwt:
+      # Must be supplied in shared/production environments.
+      # Minimum 32 bytes.
+      secret: ${APP_JWT_SECRET:}
+      issuer: desk-resolver
+      ttl: 30m
+
+    # Exact browser origins allowed to call the API.
+    cors:
+      allowed-origins: ${APP_CORS_ORIGINS:http://localhost:4200}
+      allow-credentials: false
+
+    # Swagger/OpenAPI is public for development/demo.
+    # Set to false in production.
+    swagger-public: ${APP_SWAGGER_PUBLIC:true}
+
+    # -------------------------------------------------------------------------
+    # Bootstrap administrator
+    # -------------------------------------------------------------------------
+    # Creates one ADMIN on first start only if no administrator exists
+    # and the required values are supplied.
+    bootstrap-admin:
+      email: ${APP_BOOTSTRAP_ADMIN_EMAIL:}
+      password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:}
+      full-name: ${APP_BOOTSTRAP_ADMIN_NAME:Bootstrap Administrator}
+
+    # -------------------------------------------------------------------------
+    # Login rate limiting
+    # -------------------------------------------------------------------------
+    rate-limit:
+      enabled: ${APP_RATE_LIMIT_ENABLED:true}
+      max-account-failures: 5
+      max-address-failures: 20
+      window: 15m
+      block-duration: 15m
+      max-tracked-keys: 50000
+
+      # Only enable when running behind a trusted reverse proxy
+      # that correctly appends X-Forwarded-For.
+      trust-forwarded-headers: ${APP_TRUST_FORWARDED_HEADERS:false}

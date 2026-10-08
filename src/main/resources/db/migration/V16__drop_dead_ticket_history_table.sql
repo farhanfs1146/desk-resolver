@@ -1,0 +1,28 @@
+-- Removes the orphaned ticket_history table (audit finding P2-2).
+--
+-- This table was created by V6 and superseded almost immediately by ticket_history_tracking (V7),
+-- which is what the application actually writes to. Its entity was deleted in commit 799ec14. Since
+-- then, it has been dead weight that nothing could reach:
+--   * no @Entity maps it, so Hibernate neither reads nor validates it;
+--   * no repository, service, endpoint or migration references it;
+--   * V11 deliberately skipped it when adding foreign keys everywhere else, recording that
+--     "adding constraints to a dead table would only make dropping it harder".
+--
+-- Its removal has been "scheduled" since that audit without happening. A dead table is not harmless:
+-- it appears in every schema dump and ER diagram, its name is close enough to the live table to be
+-- picked by mistake, and the longer it sits there the more it looks deliberate.
+--
+-- VERIFIED EMPTY FIRST. A drop is irreversible, so this was checked before writing:
+--   select count(*) from ticket_history;  -> 0
+-- Run that against any other environment before applying this. If a row exists anywhere, stop: the
+-- data belongs in ticket_history_tracking and must be migrated across, not discarded. The columns do
+-- not map one-to-one (action/action_time/performed_by here against
+-- action_type/changed_at/changed_by there, and this table has no field_name or remarks), which is the
+-- other reason this file does not try to be clever and copy rows automatically.
+--
+-- ticket_comments and ticket_attachments (V4, V5) are deliberately NOT dropped. They are also empty
+-- and also have no entity, but unlike this table they were never superseded - comments and
+-- attachments are simply unimplemented. Dropping them would discard a usable schema for a feature
+-- that is still wanted; see docs/DECISIONS.md.
+
+DROP TABLE ticket_history;
