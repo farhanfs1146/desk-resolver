@@ -11,28 +11,97 @@
 	<groupId>com.forward</groupId>
 	<artifactId>desk-resolver</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name/>
-	<description/>
-	<url/>
-	<licenses>
-		<license/>
-	</licenses>
-	<developers>
-		<developer/>
-	</developers>
-	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
-	</scm>
+	<name>desk-resolver</name>
+	<description>IT software support ticketing API</description>
+
 	<properties>
 		<java.version>25</java.version>
+		<springdoc.version>2.8.13</springdoc.version>
+		<testcontainers.version>2.0.5</testcontainers.version>
 	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<!-- Spring Boot 4's parent POM no longer imports the Testcontainers BOM,
+			     so the module versions have to come from the BOM directly. -->
+			<dependency>
+				<groupId>org.testcontainers</groupId>
+				<artifactId>testcontainers-bom</artifactId>
+				<version>${testcontainers.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
+		<!-- Web layer -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
+		</dependency>
+
+		<!-- Bean validation: @Valid / @NotBlank / @Size on every request DTO -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<!-- JPA entities, Spring Data repositories, Pageable/Page -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+
+		<!-- Filter chain, @PreAuthorize, BCrypt -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+
+		<!-- JWT decoding, validation and signing. Brings in spring-security-oauth2-jose
+		     transitively, which is where NimbusJwtEncoder/NimbusJwtDecoder and
+		     nimbus-jose-jwt (ImmutableSecret) come from. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+		</dependency>
+
+		<!-- Schema migrations in src/main/resources/db/migration.
+		     This must be the starter, not bare flyway-core: Spring Boot 4 moved
+		     auto-configuration out of spring-boot-autoconfigure into per-technology
+		     modules, so flyway-core alone puts Flyway on the classpath without
+		     registering FlywayMigrationInitializer - migrations silently never run
+		     and Hibernate then fails validation against an unmigrated schema. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-flyway</artifactId>
+		</dependency>
+		<!-- Flyway 10+ ships each database's support separately. -->
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-database-postgresql</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<!-- @Getter/@Setter/@Data/@Builder/@RequiredArgsConstructor -->
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<optional>true</optional>
+		</dependency>
+
+		<!-- @Operation/@Parameter/@Schema annotations and the Swagger UI the
+		     app.security.swagger-public flag exposes -->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>${springdoc.version}</version>
 		</dependency>
 
 		<dependency>
@@ -40,13 +109,80 @@
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- Integration tests run against a throwaway PostgreSQL container, not a
+		     developer's local database. The code depends on Postgres-specific
+		     behaviour that an in-memory database cannot stand in for: nextval() for
+		     ticket numbers, CREATE SEQUENCE, and index DDL with DESC ordering - so
+		     the migrations themselves are part of what the tests verify. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-testcontainers</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers-postgresql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>testcontainers-junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
 		<plugins>
+			<!-- JDK 23+ no longer discovers annotation processors on the compile
+			     classpath, so Lombok must be named on the processor path explicitly
+			     or none of the @Getter/@Builder/@RequiredArgsConstructor code is
+			     generated and the build fails on missing symbols. -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<annotationProcessorPaths>
+						<path>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+							<version>${lombok.version}</version>
+						</path>
+					</annotationProcessorPaths>
+				</configuration>
+			</plugin>
+			<!-- Integration tests are named *IT and are NOT run by surefire, whose
+			     default includes only Test*/*Test/*Tests. Without failsafe they
+			     compile, look like part of the suite, and never execute - so a green
+			     `mvn test` would say nothing about them. `mvn verify` runs both. -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-failsafe-plugin</artifactId>
+				<executions>
+					<execution>
+						<goals>
+							<goal>integration-test</goal>
+							<goal>verify</goal>
+						</goals>
+					</execution>
+				</executions>
+			</plugin>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</exclude>
+					</excludes>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>

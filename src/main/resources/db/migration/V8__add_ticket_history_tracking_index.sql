@@ -1,0 +1,33 @@
+-- Index supporting the ticket audit-trail query.
+--
+-- HISTORY OF THIS FILE. An earlier version of this header stated that the original V8 had been
+-- applied to the development database on 2026-09-29 (flyway_schema_history: version 8, checksum
+-- 1344533264), that its text was lost, and that any database which had already applied it would
+-- therefore need a one-time checksum reconciliation before Flyway would start again.
+--
+-- That was verified against the development database and is NOT true:
+--   * flyway_schema_history contains V1..V7 only - there is no V8 row, and no row with checksum
+--     1344533264;
+--   * idx_ticket_history_tracking_ticket_changed_at does not exist in the schema;
+--   * V8 through V14 have never been applied anywhere.
+--
+-- So there is no recorded checksum for this file to conflict with and no reconciliation step is
+-- needed. This migration applies as an ordinary pending migration. The warning is removed rather
+-- than left in place, because a false reconciliation warning makes a routine deployment look
+-- dangerous and invites someone to hand-edit flyway_schema_history for no reason.
+--
+-- IF NOT EXISTS is kept. It is now only defence-in-depth for a database where the index was created
+-- by hand outside Flyway, which costs nothing and keeps the migration idempotent.
+--
+-- PURPOSE. Supports TicketHistoryTrackingRepository.findHistoryRows, which filters by ticket_id and
+-- orders by changed_at descending - exactly this index's column order, so the ordering is read
+-- straight from the index with no sort. (It was originally written for an earlier
+-- findByTicketIdOrderByChangedAtDesc, which returned an unbounded List; that method has been replaced
+-- by the paged projection query, which the same index serves unchanged.)
+--
+-- The audit trail is the one table in this schema that only ever grows: a row per create, assignment
+-- and status change, and nothing deletes them. Indexing the access path matters more here over time
+-- than on any other table.
+
+CREATE INDEX IF NOT EXISTS idx_ticket_history_tracking_ticket_changed_at
+    ON ticket_history_tracking (ticket_id, changed_at DESC);
