@@ -306,6 +306,28 @@ to mean primary role, or alphabetically-first role, or something else, and nothi
 An unknown sort property is already a 400, so a client still sending it is told rather than quietly
 given a different order than it asked for.
 
+### Swagger UI had no way to send a token
+
+Found while writing up how to log in as the first administrator, and wrong since Phase 4.
+
+The OpenAPI document declared no security scheme. Swagger UI renders its **Authorize** button only
+when at least one is declared, and springdoc does not infer one — it does not read the filter chain,
+so nothing told it the API authenticates with `Authorization: Bearer`. The page the README points
+people at could therefore reach exactly one endpoint, `POST /api/auth/login`, and every other call
+answered 401 with no way to supply the token login had just returned.
+
+Nothing failed. The API was correct, every integration test passed, and the defect lived entirely in
+the interactive client — the kind of gap that is only found by opening the page and looking for a
+button. `OpenApiConfig` now declares the scheme and `OpenApiDocumentIT` asserts it, which is the
+point: a documentation contract no functional test touches needs a test of its own.
+
+The requirement is declared **globally**, mirroring `anyRequest().authenticated()` in the filter
+chain — in both places the safe state is what you get by writing nothing, and a new endpoint is
+documented as needing a token without anybody remembering to say so. `AuthController.login` opts out
+with an empty `@SecurityRequirements`, which is one annotation on the one exception rather than an
+annotation on every rule. It changes documentation only; `SecurityConfig.ALWAYS_PUBLIC` is what
+actually makes that endpoint reachable.
+
 ### Bearer-token 401s go through the application's entry point
 
 Found while testing revocation, and worth recording because it had been wrong since Phase 4.

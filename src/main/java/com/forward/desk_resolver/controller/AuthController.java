@@ -4,6 +4,7 @@ import com.forward.desk_resolver.dto.request.LoginRequest;
 import com.forward.desk_resolver.dto.response.LoginResponse;
 import com.forward.desk_resolver.service.AuthService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -27,9 +28,21 @@ public class AuthController {
 
     private final AuthService authService;
 
+    /**
+     * The only operation that opts out of the document-wide bearer requirement.
+     *
+     * <p>An empty {@code @SecurityRequirements} overrides the global requirement declared in
+     * {@code OpenApiConfig}, so Swagger UI shows no padlock here and does not attach a token. It is
+     * annotation on the exception rather than on every rule: the global default is "needs a token",
+     * matching the filter chain, and this is the one endpoint where that is untrue.
+     *
+     * <p>It changes the documentation only. What actually makes this endpoint reachable without a
+     * token is {@code SecurityConfig.ALWAYS_PUBLIC}.
+     */
     @Operation(summary = "Authenticate and obtain an access token",
             description = "Returns a signed bearer token. Send it as 'Authorization: Bearer <token>' "
                     + "on every other endpoint. Returns 401 for any credential failure.")
+    @SecurityRequirements
     @PostMapping("/login")
     public LoginResponse login(@Valid @RequestBody LoginRequest request) {
         return authService.login(request);

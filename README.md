@@ -189,11 +189,20 @@ so there is no column to order by, and "sort by role" would have to be given a m
 `http://localhost:9092/swagger-ui.html` — public by default for development; gate it with
 `APP_SWAGGER_PUBLIC=false` in production.
 
+To use a protected endpoint from the page: run `POST /api/auth/login`, copy the `accessToken` from the
+response, click **Authorize** at the top and paste it — the token value alone, without a `Bearer `
+prefix, which Swagger UI adds itself. Every operation except login carries a padlock and will then
+send the token.
+
+The Authorize button exists because `OpenApiConfig` declares the bearer scheme; springdoc does not
+infer one from the filter chain, and without the declaration the page could only ever reach the login
+endpoint.
+
 ## Tests
 
 ```bash
 ./mvnw test      # 47 unit tests, no infrastructure needed, ~2s
-./mvnw verify    # the above plus 140 integration tests in a PostgreSQL container
+./mvnw verify    # the above plus 151 integration tests in a PostgreSQL container
 ```
 
 Integration tests are named `*IT` and run under failsafe, so **`mvn test` does not run them** - use
@@ -221,6 +230,8 @@ so all of them are exercised against the real schema rather than a stub.
 | `ApiErrorHandlingIT` | every status mapping, and that no response leaks internals |
 | `TicketStatusAndModuleIT` | the module-belongs-to-application rule, the status body and `remarks`, the no-op status change |
 | `ApplicationCatalogueIT` | catalogue uniqueness and NOT NULL (V15), and that the dead `ticket_history` table is gone (V16) |
+| `OpenApiDocumentIT` | that the document declares the bearer scheme Swagger UI needs for its Authorize button, that the requirement is global, and that login opts out while logout does not |
+| `BootstrapAdminIT` | the first-administrator flow: that the created account can log in and actually manage users, and that the three guards hold - already-an-admin, unconfigured, email taken |
 | `SessionLifecycleIT` | revocation: logout, revoke-all-on-password-change, deactivation ending live sessions, an expired session, a validly signed token with no `sid`, a subject/session mismatch, and the purge |
 | `UserRoleAdministrationIT` | several roles per user and the union rule, creating and replacing role sets, unknown role codes, the roleless account, role deactivation, the `USER_MANAGE` lockout guard, and that a grant records its grantor |
 
