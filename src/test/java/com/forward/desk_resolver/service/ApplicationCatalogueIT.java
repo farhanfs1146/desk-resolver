@@ -1,7 +1,6 @@
 package com.forward.desk_resolver.service;
 
 import com.forward.desk_resolver.entity.Application;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.DisplayName;
@@ -35,7 +34,7 @@ class ApplicationCatalogueIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a duplicate app and module pair is a 409 naming the conflict")
     void duplicatePairIsRejected() throws Exception {
-        String token = tokenFor(givenUser(Role.ADMIN));
+        String token = tokenFor(givenUser("ADMIN"));
 
         mockMvc.perform(authenticated(post("/api/applications"), token)
                         .content(body("HRMS", "attendance")))
@@ -53,7 +52,7 @@ class ApplicationCatalogueIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the same application with a different module is allowed")
     void sameAppDifferentModuleIsAllowed() throws Exception {
-        String token = tokenFor(givenUser(Role.ADMIN));
+        String token = tokenFor(givenUser("ADMIN"));
 
         // This is exactly how the real catalogue is shaped: one application, many modules.
         for (String module : new String[]{"attendance", "leaves", "short term loan", "long term loan"}) {
@@ -67,7 +66,7 @@ class ApplicationCatalogueIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an update cannot collide with another row, but may keep its own name")
     void updateRespectsUniqueness() throws Exception {
-        String token = tokenFor(givenUser(Role.ADMIN));
+        String token = tokenFor(givenUser("ADMIN"));
         Application first = applicationRepository.save(catalogue("HRMS", "attendance"));
         Application second = applicationRepository.save(catalogue("HRMS", "leaves"));
 
@@ -118,7 +117,7 @@ class ApplicationCatalogueIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a blank module name is rejected by validation before it reaches the column")
     void blankModuleNameIsRejected() throws Exception {
-        mockMvc.perform(authenticated(post("/api/applications"), tokenFor(givenUser(Role.ADMIN)))
+        mockMvc.perform(authenticated(post("/api/applications"), tokenFor(givenUser("ADMIN")))
                         .content(body("HRMS", "   ")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.violations.moduleName").exists());

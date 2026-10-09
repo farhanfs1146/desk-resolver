@@ -23,6 +23,7 @@ class ClientIpResolverTest {
         return new ClientIpResolver(new SecurityProperties(null, null, null,
                 new SecurityProperties.RateLimit(true, 5, 20,
                         Duration.ofMinutes(15), Duration.ofMinutes(15), 1_000, trustForwardedHeaders),
+                null,
                 true));
     }
 

@@ -32,12 +32,22 @@ import java.util.List;
 /**
  * The security filter chain, authority wiring and crypto primitives.
  *
- * <p><strong>Model: stateless JWT bearer tokens.</strong> Chosen over server-side sessions because the
- * API is consumed by a browser SPA and the application is meant to scale horizontally. Sessions would
- * need either sticky routing or a shared session store, and a shared store is explicitly out of scope.
- * Stateless tokens also keep the door open for an external identity provider: that becomes a change to
- * {@link #jwtDecoder} plus retiring the login endpoint, with no effect on business services. The
- * trade-off is that a token cannot be revoked before it expires - see docs/DECISIONS.md.
+ * <p><strong>Model: JWT bearer tokens, with a server-side session registry.</strong> Bearer tokens were
+ * chosen over HTTP sessions because the API is consumed by a browser SPA and the application is meant
+ * to scale horizontally - no sticky routing, no shared session store, and the filter chain below is
+ * still {@code STATELESS}: no cookie is set and no {@code HttpSession} is ever created.
+ *
+ * <p>What changed in Phase 7 is that a token now names a row in {@code auth.sessions} through its
+ * {@code sid} claim, and {@link DatabaseAuthoritiesConverter} resolves it on every request. The
+ * signature, expiry and issuer checks happen first and are unchanged; the session lookup is a second
+ * gate, and it is what makes logout real and lets a password change or a deactivation end a session
+ * that already exists. That lookup is the same query that resolves the caller's permissions from
+ * {@code auth.user_roles}, so revocation did not cost a round trip of its own.
+ *
+ * <p>Tokens also remain the seam an external identity provider would replace: that becomes a change to
+ * {@link #jwtDecoder} plus retiring the login endpoint, with no effect on business services. An
+ * external issuer would mint no {@code sid}, so the session gate would have to be rethought at the
+ * same time - which is the honest cost of having made it a gate.
  *
  * <p><strong>CSRF is disabled, deliberately and for a specific reason.</strong> CSRF protection exists
  * because browsers attach ambient credentials - cookies - to cross-site requests automatically. This
@@ -74,7 +84,7 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain apiSecurity(
             HttpSecurity http,
-            JwtRoleAuthoritiesConverter authoritiesConverter,
+            DatabaseAuthoritiesConverter authoritiesConverter,
             ProblemDetailAuthenticationEntryPoint authenticationEntryPoint,
             ProblemDetailAccessDeniedHandler accessDeniedHandler) throws Exception {
 
@@ -94,6 +104,27 @@ public class SecurityConfig {
                     requests.anyRequest().authenticated();
                 })
                 .oauth2ResourceServer(oauth2 -> oauth2
+                        // The entry point has to be named HERE as well as in exceptionHandling below,
+                        // and the duplication is not redundant. Two different filters produce a 401:
+                        //
+                        //   * No token at all -> BearerTokenAuthenticationFilter never attempts
+                        //     authentication, the AuthorizationFilter denies, and
+                        //     ExceptionTranslationFilter uses the entry point from exceptionHandling.
+                        //   * A token that is present but unusable -> BearerTokenAuthenticationFilter
+                        //     fails and calls ITS OWN entry point, which defaults to
+                        //     BearerTokenAuthenticationEntryPoint and is not affected by
+                        //     exceptionHandling at all.
+                        //
+                        // Leaving the default in place had two consequences, and the second is why this
+                        // line exists. The response body was EMPTY, breaking the project-wide invariant
+                        // that every error - 401 included - is an RFC 7807 problem document; and the
+                        // default writes WWW-Authenticate: Bearer error="invalid_token",
+                        // error_description="...", which says out loud whether the token was malformed,
+                        // expired or badly signed. That was tolerable while an unusable token meant a
+                        // broken client. Since V17 it is routine - a logged-out or revoked session
+                        // arrives here - so the 401 a client actually meets has to be the documented
+                        // shape, and it has to reveal no more than any other.
+                        .authenticationEntryPoint(authenticationEntryPoint)
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(authoritiesConverter)))
                 .exceptionHandling(handling -> handling
                         .authenticationEntryPoint(authenticationEntryPoint)

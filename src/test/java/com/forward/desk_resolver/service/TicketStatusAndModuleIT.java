@@ -1,7 +1,6 @@
 package com.forward.desk_resolver.service;
 
 import com.forward.desk_resolver.entity.Application;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -50,7 +49,7 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("a module that does not belong to the chosen application is rejected")
     void moduleMustBelongToApplication() throws Exception {
         Application application = givenApplication();
-        String token = tokenFor(givenUser(Role.EMPLOYEE));
+        String token = tokenFor(givenUser("EMPLOYEE"));
 
         mockMvc.perform(authenticated(post("/api/tickets"), token)
                         .content("{\"title\":\"t\",\"description\":\"d\",\"issueType\":\"BUG\","
@@ -78,7 +77,7 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
                     return applicationRepository.save(extra);
                 });
 
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("{\"title\":\"t\",\"description\":\"d\",\"issueType\":\"BUG\","
                                 + "\"priority\":\"LOW\",\"applicationId\":" + target.getId()
                                 + ",\"moduleName\":\"" + other.getModuleName() + "\"}"))
@@ -91,7 +90,7 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
         Application application = givenApplication();
 
         // Rejecting "  sAlArY " for "Salary" would be pedantry rather than integrity...
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("{\"title\":\"t\",\"description\":\"d\",\"issueType\":\"BUG\","
                                 + "\"priority\":\"LOW\",\"applicationId\":" + application.getId()
                                 + ",\"moduleName\":\"  sAlArY \"}"))
@@ -112,8 +111,8 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("a status change can carry remarks, which reach the audit trail")
     void statusBodyRecordsRemarks() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status"), token)
                         .content("{\"status\":\"RESOLVED\",\"remarks\":\"Fixed in build 412\"}"))
@@ -129,8 +128,8 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("omitting remarks falls back to a generic description")
     void remarksAreOptional() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status"), token)
                         .content("{\"status\":\"IN_PROGRESS\"}"))
@@ -145,10 +144,10 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("the legacy ?status= parameter still works")
     void queryParameterStillWorks() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "RESOLVED"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("RESOLVED"));
     }
@@ -157,11 +156,11 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("when both are supplied the body wins, because it can carry more")
     void bodyWinsOverParameter() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
 
         mockMvc.perform(authenticated(
                         patch("/api/tickets/" + id + "/status").param("status", "CLOSED"),
-                        tokenFor(givenUser(Role.IT_SUPPORT)))
+                        tokenFor(givenUser("IT_SUPPORT")))
                         .content("{\"status\":\"IN_PROGRESS\",\"remarks\":\"body takes precedence\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("IN_PROGRESS"));
@@ -175,10 +174,10 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("supplying neither body nor parameter is the same 400 as before")
     void neitherSourceIsStillBadRequest() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.title").value("Missing parameter"))
                 .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("status")));
@@ -188,8 +187,8 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("the status body is validated")
     void bodyIsValidated() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status"), token)
                         .content("{\"status\":null}"))
@@ -214,10 +213,10 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("moving a ticket to the status it already has records nothing")
     void noOpStatusChangeRecordsNothing() throws Exception {
         Application application = givenApplication();
-        MvcResult created = createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
+        MvcResult created = createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId());
         long id = ((Number) read(created, "$.id")).longValue();
         String updatedAtBefore = read(created, "$.updatedAt");
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         // Idempotent: the caller asked for a state the ticket is already in, and it is in it.
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "OPEN"), token))
@@ -235,8 +234,8 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("re-sending RESOLVED does not move resolvedAt")
     void noOpDoesNotRestampResolvedAt() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         String resolvedAt = read(mockMvc.perform(authenticated(
                         patch("/api/tickets/" + id + "/status").param("status", "RESOLVED"), token))
@@ -256,8 +255,8 @@ class TicketStatusAndModuleIT extends AbstractPostgresIT {
     @DisplayName("a real change after a no-op is still recorded")
     void realChangeAfterNoOpStillWorks() throws Exception {
         Application application = givenApplication();
-        long id = createTicketId(tokenFor(givenUser(Role.EMPLOYEE)), application.getId());
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        long id = createTicketId(tokenFor(givenUser("EMPLOYEE")), application.getId());
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "OPEN"), token))
                 .andExpect(status().isOk());

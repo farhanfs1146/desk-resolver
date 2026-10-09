@@ -1,7 +1,6 @@
 package com.forward.desk_resolver.common.exception;
 
 import com.forward.desk_resolver.entity.Application;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -37,7 +36,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an unknown id is 404 with a problem document")
     void notFound() throws Exception {
-        mockMvc.perform(authenticated(get("/api/applications/999999"), tokenFor(givenUser(Role.ADMIN))))
+        mockMvc.perform(authenticated(get("/api/applications/999999"), tokenFor(givenUser("ADMIN"))))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404))
                 .andExpect(jsonPath("$.title").value("Resource not found"));
@@ -46,7 +45,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an unmapped path is 404, not 500")
     void unknownPath() throws Exception {
-        mockMvc.perform(authenticated(get("/api/does-not-exist"), tokenFor(givenUser(Role.ADMIN))))
+        mockMvc.perform(authenticated(get("/api/does-not-exist"), tokenFor(givenUser("ADMIN"))))
                 .andExpect(status().isNotFound());
     }
 
@@ -57,7 +56,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the wrong method is 405 and advertises what is allowed")
     void methodNotAllowed() throws Exception {
-        mockMvc.perform(authenticated(delete("/api/tickets/1"), tokenFor(givenUser(Role.ADMIN))))
+        mockMvc.perform(authenticated(delete("/api/tickets/1"), tokenFor(givenUser("ADMIN"))))
                 .andExpect(status().isMethodNotAllowed())
                 .andExpect(header().exists("Allow"))
                 .andExpect(jsonPath("$.status").value(405));
@@ -67,7 +66,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @DisplayName("an unreadable content type is 415")
     void unsupportedMediaType() throws Exception {
         mockMvc.perform(post("/api/tickets")
-                        .header("Authorization", "Bearer " + tokenFor(givenUser(Role.EMPLOYEE)))
+                        .header("Authorization", "Bearer " + tokenFor(givenUser("EMPLOYEE")))
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("not json"))
                 .andExpect(status().isUnsupportedMediaType())
@@ -77,7 +76,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an unsatisfiable Accept header is 406")
     void notAcceptable() throws Exception {
-        mockMvc.perform(authenticated(get("/api/applications"), tokenFor(givenUser(Role.ADMIN)))
+        mockMvc.perform(authenticated(get("/api/applications"), tokenFor(givenUser("ADMIN")))
                         .accept(MediaType.IMAGE_PNG))
                 .andExpect(status().isNotAcceptable());
     }
@@ -89,7 +88,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a missing required parameter is 400 and names the parameter")
     void missingParameter() throws Exception {
-        mockMvc.perform(authenticated(patch("/api/tickets/1/status"), tokenFor(givenUser(Role.IT_SUPPORT))))
+        mockMvc.perform(authenticated(patch("/api/tickets/1/status"), tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.title").value("Missing parameter"))
                 .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers.containsString("status")));
@@ -100,7 +99,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     void invalidEnumParameter() throws Exception {
         mockMvc.perform(authenticated(
                         patch("/api/tickets/1/status").param("status", "NOT_A_STATUS"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -109,7 +108,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     void invalidEnumInBody() throws Exception {
         Application application = givenApplication();
 
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("""
                                 {"title":"t","description":"d","issueType":"NOT_A_TYPE","priority":"HIGH",
                                  "applicationId":%d,"moduleName":"m"}""".formatted(application.getId())))
@@ -120,7 +119,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("malformed JSON is 400")
     void malformedJson() throws Exception {
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("{\"title\": "))
                 .andExpect(status().isBadRequest());
     }
@@ -128,7 +127,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a non-numeric path variable is 400, not 500")
     void badPathVariableType() throws Exception {
-        mockMvc.perform(authenticated(get("/api/tickets/not-a-number"), tokenFor(givenUser(Role.ADMIN))))
+        mockMvc.perform(authenticated(get("/api/tickets/not-a-number"), tokenFor(givenUser("ADMIN"))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -137,7 +136,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     void validationViolationsAreItemised() throws Exception {
         Application application = givenApplication();
 
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("""
                                 {"title":"","description":"","issueType":null,"priority":null,
                                  "applicationId":null,"moduleName":""}"""))
@@ -160,7 +159,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     void lengthViolation() throws Exception {
         Application application = givenApplication();
 
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content("""
                                 {"title":"%s","description":"d","issueType":"BUG","priority":"LOW",
                                  "applicationId":%d,"moduleName":"m"}"""
@@ -172,7 +171,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an invalid sort property or direction is 400")
     void invalidSort() throws Exception {
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(get("/api/tickets").param("sort", "passwordHash"), token))
                 .andExpect(status().isBadRequest())
@@ -196,10 +195,10 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
         Set<String> unauthorized = members(mockMvc.perform(get("/api/tickets"))
                 .andExpect(status().isUnauthorized()).andReturn().getResponse().getContentAsString());
         Set<String> forbidden = members(
-                mockMvc.perform(authenticated(get("/api/users"), tokenFor(givenUser(Role.EMPLOYEE))))
+                mockMvc.perform(authenticated(get("/api/users"), tokenFor(givenUser("EMPLOYEE"))))
                         .andExpect(status().isForbidden()).andReturn().getResponse().getContentAsString());
         Set<String> notFound = members(
-                mockMvc.perform(authenticated(get("/api/applications/999999"), tokenFor(givenUser(Role.ADMIN))))
+                mockMvc.perform(authenticated(get("/api/applications/999999"), tokenFor(givenUser("ADMIN"))))
                         .andExpect(status().isNotFound()).andReturn().getResponse().getContentAsString());
 
         assertThat(unauthorized).containsExactlyInAnyOrderElementsOf(notFound);
@@ -216,7 +215,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @Test
     @DisplayName("no error response leaks a stack trace, SQL or an internal class name")
     void errorsRevealNoInternals() throws Exception {
-        String token = tokenFor(givenUser(Role.ADMIN));
+        String token = tokenFor(givenUser("ADMIN"));
 
         for (var request : java.util.List.of(
                 authenticated(get("/api/applications/999999"), token),
@@ -239,7 +238,7 @@ class ApiErrorHandlingIT extends AbstractPostgresIT {
     @DisplayName("deactivating an application answers 204 and is a soft delete")
     void deactivationIsSoftAndAnswers204() throws Exception {
         Application application = givenApplication();
-        String token = tokenFor(givenUser(Role.ADMIN));
+        String token = tokenFor(givenUser("ADMIN"));
 
         mockMvc.perform(authenticated(delete("/api/applications/" + application.getId()), token))
                 .andExpect(status().isNoContent());

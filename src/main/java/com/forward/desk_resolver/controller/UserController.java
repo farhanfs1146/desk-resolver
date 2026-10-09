@@ -5,6 +5,7 @@ import com.forward.desk_resolver.common.web.PageRequests;
 import com.forward.desk_resolver.common.web.UserPageRequests;
 import com.forward.desk_resolver.dto.request.ChangePasswordRequest;
 import com.forward.desk_resolver.dto.request.CreateUserRequest;
+import com.forward.desk_resolver.dto.request.ReplaceUserRolesRequest;
 import com.forward.desk_resolver.dto.response.UserResponse;
 import com.forward.desk_resolver.service.UserService;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -36,12 +37,41 @@ public class UserController {
      * Creating accounts, assigning roles and setting initial passwords is administrative.
      *
      * <p>Answers 201 with the created record (audit P2-9).
+     *
+     * <p>{@code roles} is a required, non-empty array of role codes - see {@code CreateUserRequest} for
+     * why there is no default. {@code GET /api/roles} lists the valid codes.
      */
     @PreAuthorize("hasAuthority('USER_MANAGE')")
     @ResponseStatus(HttpStatus.CREATED)
     @PostMapping
     public UserResponse createUser(@Valid @RequestBody CreateUserRequest request) {
         return userService.createUser(request);
+    }
+
+    /**
+     * Sets the complete set of roles a user holds.
+     *
+     * <p>A {@code PUT} of the whole set rather than add/remove endpoints, so the operation is
+     * idempotent and two administrators editing at once cannot silently merge their intentions; see
+     * {@code ReplaceUserRolesRequest}.
+     *
+     * <p>Same permission as creating an account, because it is the same capability: deciding what an
+     * account may do. Splitting them would let somebody grant {@code ADMIN} to an existing user without
+     * being trusted to create one.
+     *
+     * <p>No revocation of the target's sessions afterwards, and that is not an oversight: authorities
+     * are resolved from the database on every request, so a role change already applies to the target's
+     * very next call. Ending their sessions would log them out to achieve something that has already
+     * happened.
+     *
+     * <p>Answers <strong>409</strong> if the change would leave no active account able to manage
+     * users - in practice, an administrator removing their own last administrative role.
+     */
+    @PreAuthorize("hasAuthority('USER_MANAGE')")
+    @PutMapping("/{id}/roles")
+    public UserResponse replaceRoles(@PathVariable Long id,
+                                     @Valid @RequestBody ReplaceUserRolesRequest request) {
+        return userService.replaceRoles(id, request);
     }
 
     /**
@@ -94,7 +124,7 @@ public class UserController {
             @Parameter(description = "Page size; capped at 100")
             @RequestParam(required = false) Integer size,
             @Parameter(description = "Sort as 'property' or 'property,asc|desc'. "
-                    + "Allowed: fullName, email, employeeCode, role, active, id")
+                    + "Allowed: fullName, email, employeeCode, active, id")
             @RequestParam(required = false) String sort
     ) {
         Page<UserResponse> result = userService.searchUsers(UserPageRequests.of(page, size, sort));

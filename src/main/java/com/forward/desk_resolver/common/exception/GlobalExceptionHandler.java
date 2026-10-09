@@ -185,6 +185,21 @@ public class GlobalExceptionHandler {
         return problem(HttpStatus.CONFLICT, "Duplicate resource", e.getMessage());
     }
 
+    /**
+     * A change refused because it would leave the application unable to undo it.
+     *
+     * <p>409 rather than 403: the caller holds the permission and the same request would succeed in any
+     * other state, which is the state of the data and not of their authority. The message is passed
+     * through in full - unlike the authentication failures below - because there is nothing to conceal
+     * and the caller needs to be told what to do instead. Logged at WARN: this is somebody one step
+     * away from locking the deployment out of its own user administration.
+     */
+    @ExceptionHandler(LockoutPreventedException.class)
+    public ProblemDetail handleLockoutPrevented(LockoutPreventedException e) {
+        log.warn("Refused a change that would have removed the last administrator: {}", e.getMessage());
+        return problem(HttpStatus.CONFLICT, "Change refused", e.getMessage());
+    }
+
     // ---------------------------------------------------------------- 401 / 403
 
     /**

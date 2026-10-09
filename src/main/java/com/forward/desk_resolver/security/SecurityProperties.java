@@ -12,6 +12,7 @@ import java.util.List;
  * @param cors           browser origins permitted to call the API
  * @param bootstrapAdmin optional first administrator, so a fresh deployment is usable
  * @param rateLimit      login abuse protection
+ * @param session        how long ended sessions are kept before being purged
  * @param swaggerPublic  whether the OpenAPI UI is reachable without authentication
  */
 @ConfigurationProperties(prefix = "app.security")
@@ -20,6 +21,7 @@ public record SecurityProperties(
         Cors cors,
         BootstrapAdmin bootstrapAdmin,
         RateLimit rateLimit,
+        Session session,
         boolean swaggerPublic
 ) {
 
@@ -30,6 +32,29 @@ public record SecurityProperties(
         rateLimit = rateLimit == null
                 ? new RateLimit(true, 0, 0, null, null, 0, false)
                 : rateLimit;
+        session = session == null ? new Session(null) : session;
+    }
+
+    /**
+     * Session bookkeeping.
+     *
+     * <p>Only the retention window is configurable here. The session's <em>lifetime</em> is not: it is
+     * {@code jwt.ttl}, because a session exists to describe one access token and the two expiring at
+     * different times would mean either a token nothing can revoke or a session nothing can use.
+     *
+     * @param retention how long a session row is kept after the token it describes expired. Expired
+     *                  rows are not deleted on expiry, so there is something to look at when asking
+     *                  which sessions existed around an incident; they are deleted eventually, because
+     *                  this table gains a row per login and nothing else removes one. The purge
+     *                  interval itself is read straight from
+     *                  {@code app.security.session.purge-interval} by {@code @Scheduled}, which needs
+     *                  a placeholder rather than a bound value.
+     */
+    public record Session(Duration retention) {
+
+        public Session {
+            retention = retention == null ? Duration.ofDays(7) : retention;
+        }
     }
 
     /**

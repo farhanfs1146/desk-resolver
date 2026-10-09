@@ -1,12 +1,14 @@
 package com.forward.desk_resolver.dto.request;
 
-import com.forward.desk_resolver.enums.Role;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
+
+import java.util.Set;
 
 @Data
 public class CreateUserRequest {
@@ -37,8 +39,20 @@ public class CreateUserRequest {
             accessMode = Schema.AccessMode.WRITE_ONLY)
     private String password;
 
-    @NotNull(message = "Role is required")
-    private Role role;
+    /**
+     * The roles the account is created with.
+     *
+     * <p>A set of codes rather than a single value, because a user can hold several roles, and
+     * {@code @NotEmpty} rather than a default of the least-privileged role, because an account created
+     * by omission is an account nobody decided on. An unknown code is a 400 naming it; it is never
+     * silently dropped, or a typo would create an account with no capabilities and answer 201.
+     *
+     * <p>A {@code Set} also means a code repeated in the payload is accepted rather than being
+     * inserted twice against the primary key of {@code auth.user_roles}.
+     */
+    @NotEmpty(message = "At least one role is required")
+    @Schema(description = "Role codes, as listed by GET /api/roles")
+    private Set<@NotBlank(message = "A role code must not be blank") String> roles;
 
     @NotNull(message = "Active status is required")
     @Schema(description = "whether employee will consider as active or not", example = "true")
