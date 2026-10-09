@@ -15,6 +15,11 @@ spring:
   # ---------------------------------------------------------------------------
   # Flyway
   # ---------------------------------------------------------------------------
+  # The `auth` schema is NOT listed here. V17 creates it itself with CREATE SCHEMA,
+  # so the connection search_path stays desk_resolver_db alone and every reference to
+  # an auth table - in migrations and in @Table(schema = "auth") - is qualified
+  # explicitly. Nothing resolves by search_path order, which is one less thing that
+  # can differ between a developer machine and a deployment.
   flyway:
     schemas: desk_resolver_db
     default-schema: desk_resolver_db
@@ -64,6 +69,23 @@ app:
       email: ${APP_BOOTSTRAP_ADMIN_EMAIL:}
       password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:}
       full-name: ${APP_BOOTSTRAP_ADMIN_NAME:Bootstrap Administrator}
+
+    # -------------------------------------------------------------------------
+    # Sessions
+    # -------------------------------------------------------------------------
+    # A session is the server-side record of one issued access token (auth.sessions),
+    # and the reason a token can be revoked before it expires.
+    #
+    # Its lifetime is NOT configurable here: it is jwt.ttl above, because a session
+    # exists to describe one token and the two expiring at different times would mean
+    # either a token nothing can revoke or a session nothing can use.
+    session:
+      # How long an ended session is kept before being deleted. Expired rows are not
+      # removed on expiry, so there is something to look at when asking which sessions
+      # existed around an incident.
+      retention: ${APP_SESSION_RETENTION:P7D}
+      # How often the purge runs. ISO-8601; read directly by @Scheduled.
+      purge-interval: ${APP_SESSION_PURGE_INTERVAL:PT1H}
 
     # -------------------------------------------------------------------------
     # Login rate limiting

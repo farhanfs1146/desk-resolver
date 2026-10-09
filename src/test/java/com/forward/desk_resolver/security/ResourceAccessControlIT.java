@@ -5,13 +5,12 @@ import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.User;
 import com.forward.desk_resolver.enums.IssueType;
 import com.forward.desk_resolver.enums.Priority;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.LocalDateTime;
 
@@ -65,8 +64,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a stranger's ticket answers 404, not 403, so ids cannot be probed")
     void strangerGetsNotFoundNotForbidden() throws Exception {
-        User owner = givenUser(Role.EMPLOYEE);
-        User stranger = givenUser(Role.EMPLOYEE);
+        User owner = givenUser("EMPLOYEE");
+        User stranger = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(owner, null, givenApplication());
 
         mockMvc.perform(authenticated(get("/api/tickets/" + ticket.getId()), tokenFor(stranger)))
@@ -80,7 +79,7 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the raiser can read their own ticket")
     void raiserCanRead() throws Exception {
-        User owner = givenUser(Role.EMPLOYEE);
+        User owner = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(owner, null, givenApplication());
 
         mockMvc.perform(authenticated(get("/api/tickets/" + ticket.getId()), tokenFor(owner)))
@@ -96,8 +95,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an EMPLOYEE assignee can read and list the ticket assigned to them")
     void assigneeCanRead() throws Exception {
-        User raiser = givenUser(Role.EMPLOYEE);
-        User assignee = givenUser(Role.EMPLOYEE);
+        User raiser = givenUser("EMPLOYEE");
+        User assignee = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(raiser, assignee, givenApplication());
         String token = tokenFor(assignee);
 
@@ -110,10 +109,10 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     }
 
     @ParameterizedTest
-    @EnumSource(value = Role.class, names = {"IT_SUPPORT", "DEVELOPER", "ADMIN"})
+    @ValueSource(strings = {"IT_SUPPORT", "DEVELOPER", "ADMIN"})
     @DisplayName("holders of TICKET_READ_ALL see tickets they are not involved in")
-    void supportStaffSeeEverything(Role role) throws Exception {
-        User owner = givenUser(Role.EMPLOYEE);
+    void supportStaffSeeEverything(String role) throws Exception {
+        User owner = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(owner, null, givenApplication());
 
         mockMvc.perform(authenticated(get("/api/tickets/" + ticket.getId()), tokenFor(givenUser(role))))
@@ -121,10 +120,10 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     }
 
     @ParameterizedTest
-    @EnumSource(value = Role.class, names = {"MANAGER", "HOD", "DIRECTOR"})
+    @ValueSource(strings = {"MANAGER", "HOD", "DIRECTOR"})
     @DisplayName("seniority does not grant visibility, because no department rule exists")
-    void seniorRolesAreStillRestricted(Role role) throws Exception {
-        User owner = givenUser(Role.EMPLOYEE);
+    void seniorRolesAreStillRestricted(String role) throws Exception {
+        User owner = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(owner, null, givenApplication());
 
         mockMvc.perform(authenticated(get("/api/tickets/" + ticket.getId()), tokenFor(givenUser(role))))
@@ -142,8 +141,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @DisplayName("the list shows only tickets the caller is involved in")
     void listIsScopedToInvolvement() throws Exception {
         Application application = givenApplication();
-        User caller = givenUser(Role.EMPLOYEE);
-        User other = givenUser(Role.EMPLOYEE);
+        User caller = givenUser("EMPLOYEE");
+        User other = givenUser("EMPLOYEE");
 
         givenTicket(caller, null, application);          // raised by caller
         givenTicket(other, caller, application);         // assigned to caller
@@ -154,7 +153,7 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Total-Count", "2"));
 
-        mockMvc.perform(authenticated(get("/api/tickets"), tokenFor(givenUser(Role.IT_SUPPORT))))
+        mockMvc.perform(authenticated(get("/api/tickets"), tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk())
                 .andExpect(header().string("X-Total-Count", "4"));
     }
@@ -163,8 +162,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @DisplayName("filtering by another user's id cannot widen the result or leak a count")
     void filterCannotEscapeTheBoundary() throws Exception {
         Application application = givenApplication();
-        User caller = givenUser(Role.EMPLOYEE);
-        User other = givenUser(Role.EMPLOYEE);
+        User caller = givenUser("EMPLOYEE");
+        User other = givenUser("EMPLOYEE");
         givenTicket(other, null, application);
         givenTicket(other, other, application);
 
@@ -185,8 +184,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("history is unreadable for a ticket the caller cannot read")
     void historyFollowsTicketVisibility() throws Exception {
-        User owner = givenUser(Role.EMPLOYEE);
-        User stranger = givenUser(Role.EMPLOYEE);
+        User owner = givenUser("EMPLOYEE");
+        User stranger = givenUser("EMPLOYEE");
         Ticket ticket = givenTicket(owner, null, givenApplication());
 
         mockMvc.perform(authenticated(get("/api/tickets/" + ticket.getId() + "/history"),
@@ -208,8 +207,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a user may read their own record but not another's")
     void userRecordsAreSelfOnlyWithoutUserRead() throws Exception {
-        User caller = givenUser(Role.EMPLOYEE);
-        User other = givenUser(Role.EMPLOYEE);
+        User caller = givenUser("EMPLOYEE");
+        User other = givenUser("EMPLOYEE");
         String token = tokenFor(caller);
 
         mockMvc.perform(authenticated(get("/api/users/" + caller.getId()), token))
@@ -225,10 +224,10 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("USER_READ holders may read any record")
     void supportStaffReadAnyUser() throws Exception {
-        User other = givenUser(Role.EMPLOYEE);
+        User other = givenUser("EMPLOYEE");
 
         mockMvc.perform(authenticated(get("/api/users/" + other.getId()),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk());
     }
 
@@ -238,8 +237,8 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @DisplayName("a requester cannot assign, change status, list users or manage the catalogue")
     void requesterIsDeniedPrivilegedEndpoints() throws Exception {
         Application application = givenApplication();
-        User caller = givenUser(Role.EMPLOYEE);
-        User assignee = givenUser(Role.IT_SUPPORT);
+        User caller = givenUser("EMPLOYEE");
+        User assignee = givenUser("IT_SUPPORT");
         Ticket own = givenTicket(caller, null, application);
         String token = tokenFor(caller);
 
@@ -259,7 +258,7 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
         mockMvc.perform(authenticated(post("/api/users"), token)
                         .content("""
                                 {"employeeCode":1,"fullName":"X","email":"x@example.test",
-                                 "role":"ADMIN","active":true,"password":"password-1234"}"""))
+                                 "roles":["ADMIN"],"active":true,"password":"password-1234"}"""))
                 .andExpect(status().isForbidden());
 
         mockMvc.perform(authenticated(post("/api/applications"), token)
@@ -271,7 +270,7 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("support staff may triage but not administer")
     void supportStaffCannotAdminister() throws Exception {
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(get("/api/users"), token))
                 .andExpect(status().isOk());
@@ -285,7 +284,7 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the 403 body names no permission, role or rule")
     void denialLeaksNothing() throws Exception {
-        String token = tokenFor(givenUser(Role.EMPLOYEE));
+        String token = tokenFor(givenUser("EMPLOYEE"));
 
         String body = mockMvc.perform(authenticated(get("/api/users"), token))
                 .andExpect(status().isForbidden())

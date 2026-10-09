@@ -3,7 +3,6 @@ package com.forward.desk_resolver.service;
 import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.User;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
@@ -57,7 +56,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("creating a ticket answers 201 and echoes every field back, module included")
     void createReturnsFullRepresentation() throws Exception {
         Application application = givenApplication();
-        User raiser = givenUser(Role.EMPLOYEE);
+        User raiser = givenUser("EMPLOYEE");
 
         mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(raiser))
                         .content(createBody(application.getId(), "HIGH")))
@@ -77,7 +76,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("createdAt and updatedAt are identical on a new ticket")
     void timestampsMatchOnCreate() throws Exception {
         Application application = givenApplication();
-        MvcResult result = createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW");
+        MvcResult result = createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW");
 
         String createdAt = read(result, "$.createdAt");
         String updatedAt = read(result, "$.updatedAt");
@@ -96,7 +95,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("ticket numbers come from the sequence: distinct and strictly increasing")
     void ticketNumbersAreUniqueAndOrdered() throws Exception {
         Application application = givenApplication();
-        String token = tokenFor(givenUser(Role.EMPLOYEE));
+        String token = tokenFor(givenUser("EMPLOYEE"));
 
         List<String> numbers = new ArrayList<>();
         for (int i = 0; i < 6; i++) {
@@ -112,7 +111,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     void inactiveApplicationIsRejected() throws Exception {
         Application retired = givenApplication(false);
 
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content(createBody(retired.getId(), "HIGH")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.title").value("Invalid reference"));
@@ -121,7 +120,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an unknown applicationId is a 400, not a 404 - the URL was right, the body was not")
     void unknownApplicationIsBadRequest() throws Exception {
-        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser(Role.EMPLOYEE)))
+        mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(givenUser("EMPLOYEE")))
                         .content(createBody(999_999L, "HIGH")))
                 .andExpect(status().isBadRequest());
     }
@@ -130,7 +129,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("creation writes a CREATED audit row in the same transaction")
     void createWritesAuditRow() throws Exception {
         Application application = givenApplication();
-        User raiser = givenUser(Role.EMPLOYEE);
+        User raiser = givenUser("EMPLOYEE");
         String token = tokenFor(raiser);
         long id = ((Number) read(createTicket(token, application.getId(), "LOW"), "$.id")).longValue();
 
@@ -154,9 +153,9 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("assignment is attributed to the assigner, not the assignee")
     void assignmentRecordsTheActor() throws Exception {
         Application application = givenApplication();
-        User raiser = givenUser(Role.EMPLOYEE);
-        User assignee = givenUser(Role.DEVELOPER);
-        User agent = givenUser(Role.IT_SUPPORT);
+        User raiser = givenUser("EMPLOYEE");
+        User assignee = givenUser("DEVELOPER");
+        User agent = givenUser("IT_SUPPORT");
 
         long id = ((Number) read(createTicket(tokenFor(raiser), application.getId(), "HIGH"), "$.id"))
                 .longValue();
@@ -179,14 +178,14 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("a ticket cannot be assigned to a deactivated account")
     void assignmentToInactiveUserIsRejected() throws Exception {
         Application application = givenApplication();
-        User inactive = givenInactiveUser(Role.DEVELOPER);
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        User inactive = givenInactiveUser("DEVELOPER");
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
 
         // Assigning to somebody who cannot sign in parks the ticket with a phantom owner: it stays
         // ASSIGNED forever and disappears from every unassigned-work view.
         mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + inactive.getId()),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -194,11 +193,11 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("an unknown assignee id is a 400")
     void assignmentToUnknownUserIsRejected() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
 
         mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/999999"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest());
     }
 
@@ -213,9 +212,9 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("resolvedAt is stamped on RESOLVED, kept on CLOSED and cleared on anything else")
     void resolvedAtTracksTheStatus() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "HIGH"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "HIGH"),
                 "$.id")).longValue();
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "RESOLVED"),
                         token))
@@ -245,11 +244,11 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("a ticket closed without being resolved keeps a null resolvedAt")
     void closedWithoutResolvingStaysNull() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "CLOSED"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.resolvedAt").doesNotExist());
     }
@@ -262,9 +261,9 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("transitions are unvalidated today, including CLOSED back to OPEN")
     void transitionsAreNotValidated() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         for (String status : new String[]{"CLOSED", "OPEN", "PENDING", "UNDER_REVIEW"}) {
             mockMvc.perform(authenticated(
@@ -285,13 +284,13 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("sorting by priority orders by severity, not alphabetically")
     void prioritySortsBySeverity() throws Exception {
         Application application = givenApplication();
-        String raiserToken = tokenFor(givenUser(Role.EMPLOYEE));
+        String raiserToken = tokenFor(givenUser("EMPLOYEE"));
         for (String priority : new String[]{"LOW", "CRITICAL", "MEDIUM", "HIGH"}) {
             createTicket(raiserToken, application.getId(), priority);
         }
 
         mockMvc.perform(authenticated(get("/api/tickets").param("sort", "priority,desc"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].priority").value("CRITICAL"))
                 .andExpect(jsonPath("$[1].priority").value("HIGH"))
@@ -299,7 +298,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
                 .andExpect(jsonPath("$[3].priority").value("LOW"));
 
         mockMvc.perform(authenticated(get("/api/tickets").param("sort", "priority,asc"),
-                        tokenFor(givenUser(Role.IT_SUPPORT))))
+                        tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].priority").value("LOW"))
                 .andExpect(jsonPath("$[3].priority").value("CRITICAL"));
@@ -309,11 +308,11 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("the list is paged, with metadata in headers and a plain array body")
     void listIsPaged() throws Exception {
         Application application = givenApplication();
-        String raiserToken = tokenFor(givenUser(Role.EMPLOYEE));
+        String raiserToken = tokenFor(givenUser("EMPLOYEE"));
         for (int i = 0; i < 5; i++) {
             createTicket(raiserToken, application.getId(), "LOW");
         }
-        String agentToken = tokenFor(givenUser(Role.IT_SUPPORT));
+        String agentToken = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(get("/api/tickets").param("size", "2"), agentToken))
                 .andExpect(status().isOk())
@@ -333,11 +332,11 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("filters narrow the list and are reflected in the total")
     void filtersApply() throws Exception {
         Application application = givenApplication();
-        String raiserToken = tokenFor(givenUser(Role.EMPLOYEE));
+        String raiserToken = tokenFor(givenUser("EMPLOYEE"));
         createTicket(raiserToken, application.getId(), "CRITICAL");
         createTicket(raiserToken, application.getId(), "LOW");
         createTicket(raiserToken, application.getId(), "LOW");
-        String agentToken = tokenFor(givenUser(Role.IT_SUPPORT));
+        String agentToken = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(get("/api/tickets").param("priority", "LOW"), agentToken))
                 .andExpect(status().isOk())
@@ -356,9 +355,9 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("history is newest first and paged")
     void historyIsNewestFirst() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(patch("/api/tickets/" + id + "/status").param("status", "IN_PROGRESS"),
                 token)).andExpect(status().isOk());
@@ -384,7 +383,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
     @DisplayName("a stale write is refused rather than silently overwriting")
     void staleWriteIsRefused() throws Exception {
         Application application = givenApplication();
-        long id = ((Number) read(createTicket(tokenFor(givenUser(Role.EMPLOYEE)), application.getId(), "LOW"),
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
                 "$.id")).longValue();
 
         Ticket first = ticketRepository.findById(id).orElseThrow();

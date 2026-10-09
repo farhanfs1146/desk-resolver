@@ -1,7 +1,6 @@
 package com.forward.desk_resolver.service;
 
 import com.forward.desk_resolver.entity.User;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -40,7 +39,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("valid credentials return a usable token and the caller's own details")
     void successfulLogin() throws Exception {
-        User user = givenUser(Role.IT_SUPPORT);
+        User user = givenUser("IT_SUPPORT");
 
         MvcResult result = login(user.getEmail(), PASSWORD);
 
@@ -56,14 +55,15 @@ class AuthenticationIT extends AbstractPostgresIT {
                 .andExpect(jsonPath("$.tokenType").value("Bearer"))
                 .andExpect(jsonPath("$.userId").value(user.getId()))
                 .andExpect(jsonPath("$.fullName").value(user.getFullName()))
-                .andExpect(jsonPath("$.role").value("IT_SUPPORT"))
+                .andExpect(jsonPath("$.roles").value("IT_SUPPORT"))
+                .andExpect(jsonPath("$.permissions", org.hamcrest.Matchers.hasItem("TICKET_ASSIGN")))
                 .andExpect(jsonPath("$.expiresIn").value(1800));
     }
 
     @Test
     @DisplayName("the issued token actually authenticates subsequent requests")
     void tokenWorks() throws Exception {
-        String token = tokenFor(givenUser(Role.IT_SUPPORT));
+        String token = tokenFor(givenUser("IT_SUPPORT"));
 
         mockMvc.perform(authenticated(get("/api/tickets"), token))
                 .andExpect(status().isOk());
@@ -74,9 +74,9 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("every credential failure produces the identical 401 body")
     void failuresAreIndistinguishable() throws Exception {
-        User known = givenUser(Role.EMPLOYEE);
-        User passwordless = givenUserWithoutPassword(Role.EMPLOYEE);
-        User inactive = givenInactiveUser(Role.EMPLOYEE);
+        User known = givenUser("EMPLOYEE");
+        User passwordless = givenUserWithoutPassword("EMPLOYEE");
+        User inactive = givenInactiveUser("EMPLOYEE");
 
         String unknownEmail = login("nobody@example.test", PASSWORD).getResponse().getContentAsString();
         String wrongPassword = login(known.getEmail(), "definitely-wrong-pass").getResponse()
@@ -98,7 +98,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a deactivated account cannot authenticate even with the right password")
     void inactiveUserCannotLogIn() throws Exception {
-        User inactive = givenInactiveUser(Role.ADMIN);
+        User inactive = givenInactiveUser("ADMIN");
 
         assertThat(login(inactive.getEmail(), PASSWORD).getResponse().getStatus()).isEqualTo(401);
     }
@@ -110,7 +110,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("an account with no password set cannot authenticate with any input")
     void passwordlessAccountCannotLogIn() throws Exception {
-        User passwordless = givenUserWithoutPassword(Role.ADMIN);
+        User passwordless = givenUserWithoutPassword("ADMIN");
 
         assertThat(login(passwordless.getEmail(), PASSWORD).getResponse().getStatus()).isEqualTo(401);
         assertThat(login(passwordless.getEmail(), "").getResponse().getStatus()).isEqualTo(400);
@@ -136,7 +136,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("repeated failures trip a 429 carrying Retry-After in seconds")
     void throttleTripsAfterThreshold() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
 
         // The configured account threshold is 5.
         for (int attempt = 1; attempt <= 5; attempt++) {
@@ -160,7 +160,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the throttle reveals nothing about the account or the limiter's state")
     void throttleLeaksNothing() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
         for (int i = 0; i < 6; i++) {
             login(user.getEmail(), "wrong-password-here");
         }
@@ -173,7 +173,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a blocked account stays blocked even with the correct password")
     void throttleAppliesBeforePasswordCheck() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
         for (int i = 0; i < 5; i++) {
             login(user.getEmail(), "wrong-password-here");
         }
@@ -196,7 +196,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a successful login clears earlier failures")
     void successResetsTheCounter() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
         for (int i = 0; i < 4; i++) {
             login(user.getEmail(), "wrong-password-here");
         }
@@ -214,7 +214,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a user replaces their own password and the new one works")
     void passwordChangeSucceeds() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
         String token = tokenFor(user);
 
         mockMvc.perform(authenticated(patch("/api/users/me/password"), token)
@@ -234,7 +234,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("the current password is verified, so a token alone cannot seize an account")
     void passwordChangeRequiresCurrentPassword() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
 
         mockMvc.perform(authenticated(patch("/api/users/me/password"), tokenFor(user))
                         .content("""
@@ -248,7 +248,7 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a new password must meet the same length bar as an administrator-set one")
     void newPasswordIsValidated() throws Exception {
-        User user = givenUser(Role.EMPLOYEE);
+        User user = givenUser("EMPLOYEE");
 
         mockMvc.perform(authenticated(patch("/api/users/me/password"), tokenFor(user))
                         .content("""
@@ -272,12 +272,12 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("a created user can log in with the password the administrator set")
     void createdUserCanLogIn() throws Exception {
-        String adminToken = tokenFor(givenUser(Role.ADMIN));
+        String adminToken = tokenFor(givenUser("ADMIN"));
 
         mockMvc.perform(authenticated(post("/api/users"), adminToken)
                         .content("""
                                 {"employeeCode":987654,"fullName":"Nadia Hussain",
-                                 "email":"nadia@example.test","role":"DEVELOPER","active":true,
+                                 "email":"nadia@example.test","roles":["DEVELOPER"],"active":true,
                                  "password":"initial-password-1"}"""))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.passwordHash").doesNotExist());
@@ -289,20 +289,20 @@ class AuthenticationIT extends AbstractPostgresIT {
     @Test
     @DisplayName("duplicate email and employee code are 409, not 500")
     void duplicatesAreConflicts() throws Exception {
-        User existing = givenUser(Role.EMPLOYEE);
-        String adminToken = tokenFor(givenUser(Role.ADMIN));
+        User existing = givenUser("EMPLOYEE");
+        String adminToken = tokenFor(givenUser("ADMIN"));
 
         mockMvc.perform(authenticated(post("/api/users"), adminToken)
                         .content("""
                                 {"employeeCode":111222,"fullName":"Clash","email":"%s",
-                                 "role":"EMPLOYEE","active":true,"password":"initial-password-1"}"""
+                                 "roles":["EMPLOYEE"],"active":true,"password":"initial-password-1"}"""
                                 .formatted(existing.getEmail())))
                 .andExpect(status().isConflict());
 
         mockMvc.perform(authenticated(post("/api/users"), adminToken)
                         .content("""
                                 {"employeeCode":%d,"fullName":"Clash","email":"fresh@example.test",
-                                 "role":"EMPLOYEE","active":true,"password":"initial-password-1"}"""
+                                 "roles":["EMPLOYEE"],"active":true,"password":"initial-password-1"}"""
                                 .formatted(existing.getEmployeeCode())))
                 .andExpect(status().isConflict());
     }

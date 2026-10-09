@@ -2,8 +2,11 @@ package com.forward.desk_resolver.common.identity;
 
 import com.forward.desk_resolver.security.Permission;
 
+import java.util.UUID;
+
 /**
- * The acting user for the current request, and what they are allowed to do.
+ * The acting user for the current request, what they are allowed to do, and the session they are
+ * acting through.
  *
  * <p>Service code asks this interface rather than reaching into Spring Security, so a service stays
  * testable with a stub and carries no dependency on how identity is transported.
@@ -22,6 +25,17 @@ public interface CurrentUserProvider {
      *                                      default user and no fallback
      */
     Long requireCurrentUserId();
+
+    /**
+     * @return the session the caller is acting through
+     * @throws MissingUserIdentityException when no usable session identity is present
+     *
+     * <p>Needed by exactly the operations that act on the session itself - logging out of this one,
+     * and ending every session a user holds. It is deliberately on the same seam as the user id: both
+     * come from the same verified token, and a service that could read one without the other would be
+     * able to end a session without knowing whose it was.
+     */
+    UUID requireCurrentSessionId();
 
     /**
      * @return true when the current caller holds the given permission

@@ -2,7 +2,6 @@ package com.forward.desk_resolver.repository;
 
 
 import com.forward.desk_resolver.entity.User;
-import com.forward.desk_resolver.enums.Role;
 import com.forward.desk_resolver.repository.projection.UserRow;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -34,23 +33,23 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     boolean existsByEmployeeCode(Long employeeCode);
 
-    /** Used by the bootstrap administrator check; counts rather than loads, so it stays cheap. */
-    long countByRole(Role role);
-
     /**
      * One page of users, projected so a listing never reads {@code password_hash} (Phase 6).
      *
      * <p>Unlike the ticket list, this is not about N+1 - {@code User} has no associations. It is about not
      * selecting a password hash to build a directory listing; see {@link UserRow}.
      *
+     * <p>Role codes are deliberately not joined in here. A user can hold several roles, so joining them
+     * would multiply the rows and break both the page size and the count; {@code UserRoleRepository}
+     * fetches them for the whole page in one further query instead. Two statements for a page of users
+     * with their roles, whatever the page size.
+     *
      * <p>An explicit {@code countQuery} is required because the main query is a constructor expression,
-     * which Spring Data cannot rewrite into a count on its own. With it, a page costs two statements
-     * whatever the number of users.
+     * which Spring Data cannot rewrite into a count on its own.
      */
     @Query(value = """
             select new com.forward.desk_resolver.repository.projection.UserRow(
-                u.id, u.employeeCode, u.fullName, u.email, u.departmentId, u.designationId,
-                u.role, u.active)
+                u.id, u.employeeCode, u.fullName, u.email, u.departmentId, u.designationId, u.active)
             from User u
             """,
             countQuery = "select count(u.id) from User u")

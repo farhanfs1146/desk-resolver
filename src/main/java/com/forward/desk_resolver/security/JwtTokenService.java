@@ -8,6 +8,7 @@ import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.UUID;
 
 /**
  * Issues signed access tokens.
@@ -17,16 +18,27 @@ import java.time.Instant;
  * where a mistake is both easy and fatal.
  *
  * <p><strong>Claims, and what is deliberately absent.</strong> The token carries {@code sub} (the
- * application user id), {@code iss}, {@code iat}, {@code exp}, plus {@code email} and {@code role} for
- * convenience. It does <em>not</em> carry granted authorities: those are derived from the role on every
- * request by {@link JwtRoleAuthoritiesConverter}. That way a change to {@link RolePermissions} takes
- * effect immediately instead of only after every outstanding token expires.
+ * application user id), {@code sid} (the session this token belongs to), {@code iss}, {@code iat},
+ * {@code exp}, plus {@code email} for convenience.
+ *
+ * <p>It carries <strong>neither authorities nor roles</strong>. Both are resolved from
+ * {@code auth.user_roles} and {@code auth.role_permissions} on every request by
+ * {@link DatabaseAuthoritiesConverter}, so a change to who holds what takes effect on the next request
+ * instead of only after every outstanding token has expired. The {@code role} claim the previous
+ * version of this class wrote is gone: a user can hold several roles now, and a claim naming one of
+ * them would be both incomplete and a tempting thing for something to start trusting.
+ *
+ * <p>{@code sid} is what made revocation possible. It is an opaque UUID, and the session it names is
+ * looked up - and checked for revocation, expiry and account status - by the same query that resolves
+ * the caller's permissions.
  */
 @Service
 public class JwtTokenService {
 
     static final String CLAIM_EMAIL = "email";
-    static final String CLAIM_ROLE = "role";
+
+    /** The session this token belongs to. See {@link DatabaseAuthoritiesConverter}. */
+    static final String CLAIM_SESSION_ID = "sid";
 
     private final JwtEncoder jwtEncoder;
     private final SecurityProperties properties;
@@ -36,18 +48,24 @@ public class JwtTokenService {
         this.properties = properties;
     }
 
-    /** @return a signed access token identifying the given user */
-    public IssuedToken issue(User user) {
-        Instant now = Instant.now();
-        Instant expiresAt = now.plus(properties.jwt().ttl());
-
+    /**
+     * @param user      the authenticated account
+     * @param sessionId the session opened for this token
+     * @param issuedAt  the instant recorded on the session row, so {@code iat} and
+     *                  {@code sessions.issued_at} cannot disagree
+     * @param expiresAt likewise for {@code exp} and {@code sessions.expires_at}: the token and the
+     *                  session it names must die together, or one of them outlives its own revocation
+     *                  window
+     * @return a signed access token identifying the given user and session
+     */
+    public IssuedToken issue(User user, UUID sessionId, Instant issuedAt, Instant expiresAt) {
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer(properties.jwt().issuer())
-                .issuedAt(now)
+                .issuedAt(issuedAt)
                 .expiresAt(expiresAt)
                 .subject(String.valueOf(user.getId()))
+                .claim(CLAIM_SESSION_ID, sessionId.toString())
                 .claim(CLAIM_EMAIL, user.getEmail())
-                .claim(CLAIM_ROLE, user.getRole().name())
                 .build();
 
         String token = jwtEncoder

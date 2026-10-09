@@ -1,11 +1,16 @@
 package com.forward.desk_resolver.service.impl;
 
+import com.forward.desk_resolver.common.identity.CurrentUserProvider;
 import com.forward.desk_resolver.dto.request.LoginRequest;
 import com.forward.desk_resolver.dto.response.LoginResponse;
 import com.forward.desk_resolver.entity.User;
+import com.forward.desk_resolver.entity.UserSession;
 import com.forward.desk_resolver.repository.UserRepository;
+import com.forward.desk_resolver.repository.UserRoleRepository;
 import com.forward.desk_resolver.security.InvalidCredentialsException;
 import com.forward.desk_resolver.security.JwtTokenService;
+import com.forward.desk_resolver.security.SecurityProperties;
+import com.forward.desk_resolver.security.SessionService;
 import com.forward.desk_resolver.security.ratelimit.ClientIpResolver;
 import com.forward.desk_resolver.security.ratelimit.LoginAttemptLimiter;
 import com.forward.desk_resolver.security.ratelimit.TooManyLoginAttemptsException;
@@ -17,11 +22,12 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Email/password authentication against the {@code users} table.
+ * Email/password authentication against {@code auth.users}.
  *
  * <p>Three properties worth noting:
  *
@@ -35,6 +41,11 @@ import java.util.UUID;
  *   <li><strong>The password never leaves this method.</strong> It is not logged, not stored, and not
  *       echoed in any response.
  * </ul>
+ *
+ * <p><strong>A successful login now writes a row</strong> - the session the token belongs to - so this
+ * service is no longer read-only. The session and the token are built from one reading of the clock
+ * and one computed expiry, so {@code sessions.expires_at} and the token's {@code exp} cannot drift
+ * apart; see {@link #issueSessionAndToken}.
  */
 @Service
 public class AuthServiceImpl implements AuthService {
@@ -42,11 +53,15 @@ public class AuthServiceImpl implements AuthService {
     private static final Logger log = LoggerFactory.getLogger(AuthServiceImpl.class);
 
     private final UserRepository userRepository;
+    private final UserRoleRepository userRoleRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenService jwtTokenService;
+    private final SessionService sessionService;
+    private final SecurityProperties properties;
+    private final CurrentUserProvider currentUserProvider;
     private final LoginAttemptLimiter loginAttemptLimiter;
     private final ClientIpResolver clientIpResolver;
-    /** Request-scoped proxy; used only to read the peer address for throttling. */
+    /** Request-scoped proxy; used only to read the peer address and user agent. */
     private final HttpServletRequest httpServletRequest;
 
     /**
@@ -68,14 +83,22 @@ public class AuthServiceImpl implements AuthService {
     private final String dummyHash;
 
     public AuthServiceImpl(UserRepository userRepository,
+                           UserRoleRepository userRoleRepository,
                            PasswordEncoder passwordEncoder,
                            JwtTokenService jwtTokenService,
+                           SessionService sessionService,
+                           SecurityProperties properties,
+                           CurrentUserProvider currentUserProvider,
                            LoginAttemptLimiter loginAttemptLimiter,
                            ClientIpResolver clientIpResolver,
                            HttpServletRequest httpServletRequest) {
         this.userRepository = userRepository;
+        this.userRoleRepository = userRoleRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtTokenService = jwtTokenService;
+        this.sessionService = sessionService;
+        this.properties = properties;
+        this.currentUserProvider = currentUserProvider;
         this.loginAttemptLimiter = loginAttemptLimiter;
         this.clientIpResolver = clientIpResolver;
         this.httpServletRequest = httpServletRequest;
@@ -83,7 +106,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional
     public LoginResponse login(LoginRequest request) {
         String clientIp = clientIpResolver.resolve(httpServletRequest);
 
@@ -93,13 +116,20 @@ public class AuthServiceImpl implements AuthService {
                 TooManyLoginAttemptsException.class);
 
         try {
-            LoginResponse response = authenticate(request);
+            LoginResponse response = authenticate(request, clientIp);
             guard(() -> loginAttemptLimiter.recordSuccess(request.getEmail(), clientIp), null);
             return response;
         } catch (InvalidCredentialsException e) {
             guard(() -> loginAttemptLimiter.recordFailure(request.getEmail(), clientIp), null);
             throw e;
         }
+    }
+
+    @Override
+    @Transactional
+    public void logout() {
+        UUID sessionId = currentUserProvider.requireCurrentSessionId();
+        sessionService.revoke(sessionId, SessionService.RevocationReason.LOGOUT);
     }
 
     /**
@@ -127,7 +157,7 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
-    private LoginResponse authenticate(LoginRequest request) {
+    private LoginResponse authenticate(LoginRequest request, String clientIp) {
         Optional<User> candidate = userRepository.findByEmail(request.getEmail());
 
         String storedHash = candidate
@@ -156,8 +186,37 @@ public class AuthServiceImpl implements AuthService {
             throw invalidCredentials();
         }
 
-        JwtTokenService.IssuedToken token = jwtTokenService.issue(user);
-        log.info("Issued access token for user {} with role {}", user.getId(), user.getRole());
+        return issueSessionAndToken(user, clientIp);
+    }
+
+    /**
+     * Opens a session and mints the token that names it.
+     *
+     * <p>Order matters and is forced: the token carries the session id, so the session has to exist
+     * first. {@code issuedAt} and {@code expiresAt} are computed once here and handed to both, which is
+     * the only way to be sure the row and the claims describe the same lifetime - deriving the expiry
+     * twice from two {@code Instant.now()} calls would leave them microseconds apart, which is harmless
+     * until the day it is not.
+     *
+     * <p>The roles and permissions in the response are read back from the database rather than
+     * assembled in memory, so what the client is told matches what the request path will decide. They
+     * are for rendering only; nothing on the server reads them again.
+     */
+    private LoginResponse issueSessionAndToken(User user, String clientIp) {
+        Instant issuedAt = Instant.now();
+        Instant expiresAt = issuedAt.plus(properties.jwt().ttl());
+
+        UserSession session = sessionService.open(
+                user.getId(), issuedAt, expiresAt, clientIp, userAgent());
+
+        JwtTokenService.IssuedToken token =
+                jwtTokenService.issue(user, session.getId(), issuedAt, expiresAt);
+
+        var roles = userRoleRepository.findActiveRoleCodesByUserId(user.getId());
+        var permissions = userRoleRepository.findActivePermissionCodesByUserId(user.getId());
+
+        log.info("Issued access token for user {} on session {} with roles {}",
+                user.getId(), session.getId(), roles);
 
         return LoginResponse.builder()
                 .accessToken(token.token())
@@ -165,8 +224,14 @@ public class AuthServiceImpl implements AuthService {
                 .expiresIn(token.expiresIn())
                 .userId(user.getId())
                 .fullName(user.getFullName())
-                .role(user.getRole().name())
+                .roles(roles)
+                .permissions(permissions)
                 .build();
+    }
+
+    /** Recorded on the session for diagnostics, never trusted for anything. */
+    private String userAgent() {
+        return httpServletRequest == null ? null : httpServletRequest.getHeader("User-Agent");
     }
 
     private static InvalidCredentialsException invalidCredentials() {

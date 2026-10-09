@@ -57,6 +57,7 @@ class InMemoryLoginAttemptLimiterTest {
         return new SecurityProperties(null, null, null,
                 new SecurityProperties.RateLimit(
                         enabled, accountFailures, addressFailures, window, block, maxKeys, false),
+                null,
                 true);
     }
 
