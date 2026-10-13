@@ -3,16 +3,23 @@ package com.forward.desk_resolver.support;
 import com.jayway.jsonpath.JsonPath;
 import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Role;
+import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.User;
 import com.forward.desk_resolver.entity.UserRole;
+import com.forward.desk_resolver.enums.IssueType;
+import com.forward.desk_resolver.enums.Priority;
+import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.repository.ApplicationRepository;
 import com.forward.desk_resolver.repository.RoleRepository;
+import com.forward.desk_resolver.repository.TicketAttachmentRepository;
+import com.forward.desk_resolver.repository.TicketCommentRepository;
 import com.forward.desk_resolver.repository.TicketHistoryTrackingRepository;
 import com.forward.desk_resolver.repository.TicketRepository;
 import com.forward.desk_resolver.repository.UserRepository;
 import com.forward.desk_resolver.repository.UserRoleRepository;
 import com.forward.desk_resolver.repository.UserSessionRepository;
 import com.forward.desk_resolver.security.ratelimit.InMemoryLoginAttemptLimiter;
+import com.forward.desk_resolver.storage.AttachmentStorageProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -25,7 +32,14 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -63,7 +77,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         // The bootstrap administrator is deliberately left unconfigured: these tests create their own
         // users, and BootstrapAdminInitializer must not insert a row the tests did not ask for.
         "app.security.bootstrap-admin.email=",
-        "app.security.bootstrap-admin.password="
+        "app.security.bootstrap-admin.password=",
+        // Stated rather than inherited. The shipped default is now false, and OpenApiDocumentIT reads
+        // /v3/api-docs unauthenticated - so leaving this to the default would make that suite assert
+        // whatever application.yaml happened to say. SwaggerGatingIT covers the false case, in its own
+        // context, because the two cannot share one.
+        "app.security.swagger-public=true",
+        // Attachments are written to a temporary directory, never to the configured ./data/attachments
+        // a developer's own runs use: a test suite that deleted rows but left files behind would
+        // accumulate them in the working tree, and one that cleaned ./data/attachments would delete a
+        // developer's. resetState() empties this directory before each test.
+        "app.storage.attachments.directory=${java.io.tmpdir}/desk-resolver-test-attachments"
 })
 @AutoConfigureMockMvc
 public abstract class AbstractPostgresIT {
@@ -86,8 +110,11 @@ public abstract class AbstractPostgresIT {
     @Autowired protected ApplicationRepository applicationRepository;
     @Autowired protected TicketRepository ticketRepository;
     @Autowired protected TicketHistoryTrackingRepository ticketHistoryTrackingRepository;
+    @Autowired protected TicketCommentRepository ticketCommentRepository;
+    @Autowired protected TicketAttachmentRepository ticketAttachmentRepository;
     @Autowired protected PasswordEncoder passwordEncoder;
     @Autowired protected InMemoryLoginAttemptLimiter loginAttemptLimiter;
+    @Autowired protected AttachmentStorageProperties attachmentStorageProperties;
 
     /**
      * A clean database and a clean throttle before every test.
@@ -103,9 +130,19 @@ public abstract class AbstractPostgresIT {
      * cannot be deleted while that grant exists. Clearing the grants first removes the question. Roles
      * and permissions are never deleted - they are seed data from {@code V17}, and a test that wiped
      * them would leave every later test unable to create a user.
+     *
+     * <p>Comments and attachments join the children, ahead of tickets and users: both reference
+     * {@code tickets} and {@code auth.users} with {@code ON DELETE RESTRICT}, so a leftover comment
+     * would make the next test's user deletion fail rather than its own.
+     *
+     * <p>Stored attachment files are removed too. Rows and blobs are separate by design, so deleting
+     * one does not delete the other - and a suite that cleaned only the table would leave the
+     * directory growing for the life of the machine.
      */
     @BeforeEach
     void resetState() {
+        ticketCommentRepository.deleteAll();
+        ticketAttachmentRepository.deleteAll();
         ticketHistoryTrackingRepository.deleteAll();
         ticketRepository.deleteAll();
         applicationRepository.deleteAll();
@@ -113,6 +150,34 @@ public abstract class AbstractPostgresIT {
         userRoleRepository.deleteAll();
         userRepository.deleteAll();
         loginAttemptLimiter.clearAll();
+        clearStoredAttachments();
+    }
+
+    /**
+     * Empties the attachment directory, keeping the directory itself.
+     *
+     * <p>Kept rather than deleted because {@code LocalAttachmentStorage} resolves and creates its root
+     * once at startup: removing the directory out from under a cached application context would leave
+     * every later upload writing into a path that no longer exists.
+     */
+    private void clearStoredAttachments() {
+        Path root = Path.of(attachmentStorageProperties.directory());
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        try (Stream<Path> entries = Files.walk(root)) {
+            entries.sorted(Comparator.reverseOrder())
+                    .filter(path -> !path.equals(root))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not clear the test attachment directory " + root, e);
+        }
     }
 
     // ------------------------------------------------------------------ fixtures
@@ -178,6 +243,39 @@ public abstract class AbstractPostgresIT {
         application.setModuleName("Salary");
         application.setActive(active);
         return applicationRepository.save(application);
+    }
+
+    /**
+     * Creates a ticket directly, bypassing the API.
+     *
+     * <p>Lifted here from {@code ResourceAccessControlIT}, which had it privately, once three suites
+     * needed it. Seeding rather than posting is the point in two of them:
+     *
+     * <ul>
+     *   <li>it sets up a ticket whose raiser and assignee are whoever the test needs, including
+     *       combinations the endpoints will not produce - an {@code EMPLOYEE} assignee is now refused
+     *       by {@code POST .../assign/...}, and the read path still has to handle such a row;
+     *   <li>it costs no login, no permission and no second request, so a test about comments is not
+     *       also a test of ticket creation.
+     * </ul>
+     *
+     * @param assignedTo may be null, in which case the ticket is left OPEN and unassigned
+     */
+    protected Ticket givenTicket(User raisedBy, User assignedTo, Application application) {
+        Ticket ticket = new Ticket();
+        ticket.setTicketNumber("TKT-" + System.nanoTime());
+        ticket.setTitle("Payslip incorrect");
+        ticket.setDescription("Net pay miscalculated for March");
+        ticket.setIssueType(IssueType.BUG);
+        ticket.setPriority(Priority.HIGH);
+        ticket.setStatus(assignedTo == null ? TicketStatus.OPEN : TicketStatus.ASSIGNED);
+        ticket.setCreatedAt(LocalDateTime.now());
+        ticket.setUpdatedAt(LocalDateTime.now());
+        ticket.setRaisedBy(raisedBy);
+        ticket.setAssignedTo(assignedTo);
+        ticket.setApplication(application);
+        ticket.setModuleName(application.getModuleName());
+        return ticketRepository.save(ticket);
     }
 
     // ------------------------------------------------------------------ http helpers

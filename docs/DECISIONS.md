@@ -15,7 +15,13 @@ the candidates that were built, measured and rejected.
 `V17`'s indexes carry **no** measurements, and say so. They are created on empty tables in the same
 migration, so there is nothing to measure and a number produced from seven roles would say nothing
 about a deployment. Each is justified by naming the query it serves instead. Re-measure once
-`auth.sessions` has a real login history behind it.
+`auth.sessions` has a real login history behind it. The same applies to `V19`'s two indexes, created on
+tables that were empty because the feature did not exist yet.
+
+**Entries struck through have been answered or resolved.** They are kept rather than deleted: an
+argument that turned out to be wrong is the one most worth being able to read, and a decision that was
+reversed should not look like it was never made. §1's assignee question and §5 in full are both
+reversals of what this file previously recorded.
 
 ---
 
@@ -58,20 +64,33 @@ the department. `users.department_id` is still a bare `BIGINT` pointing at nothi
 schema instead of `desk_resolver_db`. `RolePermissionSeedIT.seniorRequesterRolesAreNotPrivileged`
 pins the three roles to `EMPLOYEE`, so a seed that quietly widened one of them would fail the build.
 
-### May a requester be an assignee?
+### ~~May a requester be an assignee?~~ — answered: no
 
-Yes, today, and deliberately. A rejected change is recorded here so it is not re-proposed: requiring an
-assignee's role to hold `TICKET_STATUS_CHANGE`, on the reasoning that a requester-role assignee can see a
-ticket but never progress it.
+**No, as of the comments/attachments change.** This entry previously recorded the opposite, and the
+reversal is kept visible rather than overwritten, because the argument that was wrong is instructive.
 
-That is wrong, and the codebase says so in two places. `Permission.TICKET_READ_OWN` is documented as
-"read tickets the user is involved in, as raiser *or as assignee*", and `TicketRow.involves` implements
-that for any user regardless of role — if only status-changers could be assignees, the assignee half of
-that check would be unreachable for every requester role. `ResourceAccessControlIT.assigneeCanRead`
-asserts an `EMPLOYEE` assignee can read and list the ticket assigned to them.
+`TicketServiceImpl.requireAssignable` now refuses an assignee whose active roles do not grant
+`TICKET_STATUS_CHANGE`, alongside the existing check that the account is active. Both conditions exist
+for one reason: an assignment that cannot be acted on parks the ticket with a phantom owner. It reads
+as `ASSIGNED`, drops out of every unassigned-work view, and the person holding it is refused by the API
+the moment they try to record anything.
 
-Assignment to a requester is plausibly "this needs something from you". Narrowing it would mean inventing
-a workflow rule and breaking a passing security test to do it.
+**What the old entry got right, and what it got wrong.** It was right that
+`Permission.TICKET_READ_OWN` covers a ticket the user is assigned to, and that `TicketRow.involves` is
+role-agnostic. That half is untouched: whoever sits in `assigned_to` can still read the ticket whatever
+their roles are, and `ResourceAccessControlIT.assigneeCanRead` still asserts it for an `EMPLOYEE`
+assignee — seeding the row directly, because rows like that exist (anything assigned before this check,
+or changed in the database) and the read path has to keep answering correctly for them.
+
+It was wrong that assignment is how you say "this needs something from you". That was the real need
+behind the old decision, and it was being met by the only field that happened to be available. There is
+now a comment, which any involved party can leave and read, so the assignee field no longer has to carry
+a message it was never shaped for. Assignment means ownership of the work.
+
+`TicketLifecycleIT.assignmentToRequesterRoleIsRejected` covers all four requester roles;
+`assignmentFollowsTheCurrentGrants` pins that the check reads `auth.user_roles` per attempt rather than
+comparing role names, so promoting somebody makes them assignable immediately; and
+`bothConditionsAreCheckedIndependently` establishes that neither condition is standing in for the other.
 
 ### Does reassignment reset progress?
 
@@ -168,10 +187,21 @@ The behavioural change was unavoidable — an unbounded list was the original de
 ignores the new parameters now receives the newest 20 rows instead of every row, rather than failing to
 parse anything at all. All five headers are CORS-exposed, or a browser client could not read them.
 
-### Swagger is public by default
+### ~~Swagger is public by default~~ — the default is now `false`
 
-`app.security.swagger-public` defaults to `true` for development convenience. **Set it to `false` in
-production**; the API description is a map of the attack surface.
+`app.security.swagger-public` used to default to `true`, with a note in this file saying to set it to
+`false` in production. That is the shape of mitigation that does not work: it relies on every
+deployment reading the documentation and overriding a default that is already wrong, and nothing fails
+if one does not. The API description enumerates every endpoint, its parameters and the permission each
+asserts, which is a map of the attack surface.
+
+The default is now `false`. Set `APP_SWAGGER_PUBLIC=true` for local development or a demo environment —
+an opt-in to exposure, which is the direction a security default has to run.
+
+`SwaggerGatingIT` pins the gated path, including that the refusal is an RFC 7807 document and that an
+authenticated caller can still read the document. It pays for a second application context, because the
+flag is read when the filter chain is built and every other suite needs it on; that was preferable to
+shipping, as the default, the branch nothing exercised.
 
 ---
 
@@ -347,19 +377,97 @@ are now the same document and reveal the same nothing.
 
 ---
 
-## 5. Unimplemented, with schema already present
+## 5. ~~Unimplemented, with schema already present~~ — comments and attachments are built
 
-`ticket_comments` (V4) and `ticket_attachments` (V5) exist as tables, with foreign keys added in V11, but
-have no entity, repository, service or endpoint. Their half-built entities — every association commented
-out, so neither could ever have been persisted against `NOT NULL` columns — were deleted rather than left
-to look like working code.
+This section used to record `ticket_comments` (V4) and `ticket_attachments` (V5) as tables with no
+entity, repository, service or endpoint — kept rather than dropped, unlike `ticket_history`, because
+they were never superseded by anything and the feature was simply not built. `V19` builds it, so there
+is no unreachable schema left in this database.
 
-The tables are deliberately kept. Unlike `ticket_history`, which V6 created and V7 immediately superseded
-and which `V16` drops, these were never replaced by anything: the feature is simply not built. Dropping
-them would discard a usable schema for a feature that is still wanted.
+It also said `Permission` would gain entries "when the endpoints do". It has:
+`TICKET_COMMENT_READ`, `TICKET_COMMENT_CREATE`, `TICKET_ATTACHMENT_READ` and
+`TICKET_ATTACHMENT_UPLOAD`, seeded by `V19` in the same change as the controllers that assert them and
+the suites that exercise them.
 
-`Permission` has no entries for comments or attachments, on the principle that an unused permission is an
-untested permission. They get one when the endpoints do.
+### Participation is granted to every role
+
+All four permissions go to all seven roles, which is wider than the ticket permissions in V17 and is the
+decision most worth stating. Those distinguish requesters from support staff because reading *every*
+ticket and changing a ticket's *state* are things a requester must not do. Commenting and attaching are
+neither — they are how the person who raised a ticket supplies the screenshot and answers the question
+that gets it resolved, and withholding them from requesters would leave the feature with nobody to talk
+to.
+
+The grant is safe because it is not what controls scope. Every comment and attachment endpoint runs
+`TicketVisibilityGuard` first, so a requester reaches the thread on a ticket they raised or were
+assigned and gets the same 404 as ever on anybody else's. Support staff reach every thread because they
+hold `TICKET_READ_ALL`, not because of anything in V19.
+
+### Comments are append-only, and change nothing about the ticket
+
+No update or delete endpoint, no `updated_at`, no `@Version`: a comment is a record of something
+somebody said at a time, and editing one would rewrite a conversation other people have already read.
+
+Commenting also writes nothing to `ticket_history_tracking` and does not touch the ticket's status or
+`updated_at`. That is what lets requesters comment at all — a comment that moved a ticket through states
+would be a state change in disguise, handing out the thing `TICKET_STATUS_CHANGE` is withheld for. The
+thread is its own append-only record, next to the audit trail rather than inside it.
+`TicketCommentIT.commentingDoesNotTouchTheTicket` asserts it.
+
+### Attachment bytes live on a disk, not in a `bytea` column
+
+The row names a file; the file sits under `app.storage.attachments.directory`. A `bytea` column was
+rejected: it would put arbitrary user-supplied megabytes through the connection pool and into every
+backup of a database whose other tables dump in seconds, and it would turn a streaming download into a
+question of how much heap one request may use.
+
+The cost is that the two stores can disagree, and this is accepted rather than hidden. Nothing spans
+PostgreSQL and a filesystem, so the order is chosen to leave the harmless inconsistency: the file is
+written first and the row second, and the row's insert is flushed inside a `try` that deletes the blob
+if it fails. A crash between the two statements leaks an unreferenced blob — invisible, wasted disk —
+rather than a row pointing at nothing, which would be an attachment a user can see and cannot download.
+`TicketAttachmentIT.aMissingBlobIsReported` covers the row-without-bytes case, which a restored backup
+or a cleared volume produces: it is a 500 naming the problem, with the row left intact.
+
+### Uploads: an allow-list, a generated path, and never `inline`
+
+Three decisions, each refusing a class of problem rather than filtering instances of it:
+
+- **Content types are an allow-list**, not a deny-list. A deny-list has to be complete to work, and the
+  entry nobody thought of is the one that gets used. Note what this does *not* establish: the value
+  matched is the `Content-Type` the client sent, and nothing sniffs the bytes.
+- **The stored path is generated** — `<ticketId>/<uuid><ext>` — and the client's filename is never part
+  of it. So there is no path-shaped input to sanitise, which is the version of a traversal defence that
+  cannot be bypassed by an encoding nobody considered. `LocalAttachmentStorage.load` re-checks that a
+  key resolves inside the root anyway, because keys come from the database and a row could have been
+  written by something else.
+- **Downloads are always `Content-Disposition: attachment`.** Since the declared content type is not
+  trustworthy, serving a file inline would let an uploader choose how the browser executes it in this
+  application's origin — stored XSS via a file picker. `X-Content-Type-Options: nosniff` is already
+  global, so there are two independent reasons the bytes cannot render as script.
+
+The client's filename is still kept, for display and for the download header, and is reduced to its last
+segment with control characters and quotes stripped — not as the traversal defence, but because that
+string lands in a `Content-Disposition` header where a `CR` is header injection. `SafeFileNameTest`
+covers it.
+
+### No delete endpoint for attachments
+
+Removing an attachment is two irreversible operations that cannot be made atomic, and the rule it would
+need — may the uploader remove it? the assignee? after the ticket is closed? — is not established
+anywhere. Same reasoning as the status transitions above: the gap is left open rather than filled with
+an invented rule.
+
+### Local disk does not survive horizontal scaling
+
+`LocalAttachmentStorage` writes to a directory, so a file uploaded through one instance is not readable
+from another unless the directory is shared storage. This is the second thing in this application that
+does not scale horizontally, alongside the in-memory login throttle.
+
+It is behind the `AttachmentStorage` interface for exactly that reason: object storage is a new
+implementation of two methods, not a change to the service or the controller. Deletion is deliberately
+*not* on that interface — the feature has no delete operation, and putting one there would be shaping
+the contract around a rollback path.
 
 ---
 
@@ -372,8 +480,18 @@ authoritative role-to-permission table is GET /api/roles; the seed that produces
 Two points that belong with the decisions above:
 
 - **Never commit a secret.** `app.security.jwt.secret` and the bootstrap administrator's password come
-  from the environment. With no JWT secret configured the application generates a random key per JVM and
-  warns loudly: secure, but tokens do not survive a restart and will not validate on another instance.
+  from the environment.
+- **A missing JWT secret is now a startup failure, not a warning.** It used to generate a random key per
+  JVM and log loudly about it. That was secure and still wrong, because the failure it produces does not
+  look like a configuration failure: the application starts, logins succeed, tokens are issued, and then
+  every token stops working after a restart and none validates on a second instance. Behind a load
+  balancer that is an intermittent 401 following no visible pattern, with the explanation hours up the
+  log. Refusing to start reports the same mistake at the moment it is made.
+
+  The convenience is restored by one explicit opt-in, `app.security.jwt.allow-generated-secret`
+  (`APP_JWT_ALLOW_GENERATED_SECRET`), which a developer machine sets and nothing shared should. It has
+  to be turned on deliberately, so it cannot be the thing nobody noticed. `JwtSigningKeyTest` covers
+  both paths, including that a configured secret still wins over the flag.
 - **The bootstrap administrator is a one-time door, not an account to keep.** It is created only when no
   user holds `ADMIN`, so it cannot be used to reset an existing administrator's password by restarting
   with different configuration. Change the password through `PATCH /api/users/me/password` afterwards and

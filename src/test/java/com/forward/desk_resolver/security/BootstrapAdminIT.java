@@ -42,7 +42,7 @@ class BootstrapAdminIT extends AbstractPostgresIT {
     private BootstrapAdminInitializer initializer(String email, String password) {
         SecurityProperties properties = new SecurityProperties(
                 new SecurityProperties.Jwt("test-signing-key-at-least-32-bytes", "desk-resolver",
-                        Duration.ofMinutes(30)),
+                        Duration.ofMinutes(30), false),
                 null,
                 new SecurityProperties.BootstrapAdmin(email, password, "Bootstrap Administrator"),
                 null,
@@ -77,7 +77,11 @@ class BootstrapAdminIT extends AbstractPostgresIT {
                                 .formatted(EMAIL, BOOTSTRAP_PASSWORD)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.roles[0]").value("ADMIN"))
-                .andExpect(jsonPath("$.permissions.length()").value(9))
+                // Against the enum rather than a literal. This was 9, and went stale the moment
+                // comments and attachments added four permissions - a count nothing derives is a
+                // number that has to be remembered, which is the same complaint Permission's own
+                // javadoc records about an endpoint count it used to assert.
+                .andExpect(jsonPath("$.permissions.length()").value(Permission.values().length))
                 .andReturn();
 
         String token = read(login, "$.accessToken");

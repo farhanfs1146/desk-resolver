@@ -3,16 +3,11 @@ package com.forward.desk_resolver.security;
 import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.User;
-import com.forward.desk_resolver.enums.IssueType;
-import com.forward.desk_resolver.enums.Priority;
-import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-
-import java.time.LocalDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -37,22 +32,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class ResourceAccessControlIT extends AbstractPostgresIT {
 
-    private Ticket givenTicket(User raisedBy, User assignedTo, Application application) {
-        Ticket ticket = new Ticket();
-        ticket.setTicketNumber("TKT-" + System.nanoTime());
-        ticket.setTitle("Payslip incorrect");
-        ticket.setDescription("Net pay miscalculated for March");
-        ticket.setIssueType(IssueType.BUG);
-        ticket.setPriority(Priority.HIGH);
-        ticket.setStatus(assignedTo == null ? TicketStatus.OPEN : TicketStatus.ASSIGNED);
-        ticket.setCreatedAt(LocalDateTime.now());
-        ticket.setUpdatedAt(LocalDateTime.now());
-        ticket.setRaisedBy(raisedBy);
-        ticket.setAssignedTo(assignedTo);
-        ticket.setApplication(application);
-        ticket.setModuleName("Salary");
-        return ticketRepository.save(ticket);
-    }
+    // givenTicket moved to AbstractPostgresIT once the comment and attachment suites needed it too.
 
     // ---------------------------------------------------------------- reading one ticket
 
@@ -88,9 +68,19 @@ class ResourceAccessControlIT extends AbstractPostgresIT {
     }
 
     /**
-     * Being the assignee is involvement. This is the behaviour {@code requireAssignable} cites when
-     * declining to restrict assignment to roles that can change status: a requester-role assignee has to
-     * be able to see the work handed to them.
+     * Being the assignee is involvement, whatever roles the assignee holds.
+     *
+     * <p><strong>This test survived the change it used to justify.</strong> It was previously cited by
+     * {@code requireAssignable} as the reason assignment to a requester-role user was allowed; that
+     * argument no longer holds and the endpoint now refuses such an assignment, because an assignee who
+     * cannot change status cannot progress the work. What this pins down is unaffected and still has to
+     * be true: {@code TicketRow.involves} is role-agnostic, so whoever sits in {@code assigned_to} can
+     * read the ticket.
+     *
+     * <p>Which is why the row is <em>seeded</em> rather than created through the assign endpoint. Rows
+     * like this exist - anything assigned before the check, or by a direct database change - and the
+     * read path has to keep answering correctly for them. A test that went through the endpoint would
+     * now be asserting the endpoint's rule a second time instead of the row rule nothing else covers.
      */
     @Test
     @DisplayName("an EMPLOYEE assignee can read and list the ticket assigned to them")

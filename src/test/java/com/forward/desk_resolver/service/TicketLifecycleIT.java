@@ -7,6 +7,8 @@ import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.support.AbstractPostgresIT;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -187,6 +189,88 @@ class TicketLifecycleIT extends AbstractPostgresIT {
         mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + inactive.getId()),
                         tokenFor(givenUser("IT_SUPPORT"))))
                 .andExpect(status().isBadRequest());
+    }
+
+    /**
+     * An assignee has to be able to progress the ticket.
+     *
+     * <p>This reverses an earlier decision, which {@code docs/DECISIONS.md} had recorded as a rejected
+     * change: any active account could be assigned, on the argument that an assignment to a requester
+     * means "this needs something from you". It does not survive comments existing - that message is
+     * now a comment, which is a thing a requester can both leave and receive - and what it left behind
+     * was a ticket reading {@code ASSIGNED}, absent from every unassigned-work view, owned by somebody
+     * the API refuses to let record a status change.
+     *
+     * <p>Parameterised over all four requester roles rather than {@code EMPLOYEE} alone, because
+     * {@code MANAGER}, {@code HOD} and {@code DIRECTOR} are identical to it today and a seed that
+     * widened one of them should surface here too.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"EMPLOYEE", "MANAGER", "HOD", "DIRECTOR"})
+    @DisplayName("a ticket cannot be assigned to an account that cannot change status")
+    void assignmentToRequesterRoleIsRejected(String role) throws Exception {
+        Application application = givenApplication();
+        User requester = givenUser(role);
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
+                "$.id")).longValue();
+
+        mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + requester.getId()),
+                        tokenFor(givenUser("IT_SUPPORT"))))
+                .andExpect(status().isBadRequest())
+                // The message has to name the missing permission: "cannot be assigned" alone leaves
+                // whoever is triaging to guess whether the account is wrong or the ticket is.
+                .andExpect(jsonPath("$.detail").value(
+                        org.hamcrest.Matchers.containsString("TICKET_STATUS_CHANGE")));
+    }
+
+    /**
+     * The grant is read from the database on each attempt, not from a compiled table.
+     *
+     * <p>Which means promoting somebody makes them assignable immediately - the same property that
+     * makes a role change take effect on the next request. Worth pinning: the obvious implementation of
+     * this check is a role-name comparison, and that is the version this asserts is not what happened.
+     */
+    @Test
+    @DisplayName("granting a role that can change status makes the user assignable at once")
+    void assignmentFollowsTheCurrentGrants() throws Exception {
+        Application application = givenApplication();
+        User promoted = givenUser("EMPLOYEE");
+        String agentToken = tokenFor(givenUser("IT_SUPPORT"));
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
+                "$.id")).longValue();
+
+        mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + promoted.getId()), agentToken))
+                .andExpect(status().isBadRequest());
+
+        grantRoles(promoted, "IT_SUPPORT");
+
+        mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + promoted.getId()), agentToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ASSIGNED"))
+                .andExpect(jsonPath("$.assignedTo").value(promoted.getFullName()));
+    }
+
+    /**
+     * A deactivated account is refused even when its roles would otherwise permit assignment.
+     *
+     * <p>The two conditions are separate checks, and this is the case that tells them apart: a
+     * {@code DEVELOPER} holds {@code TICKET_STATUS_CHANGE}, so a permission check alone would accept
+     * this user. {@code assignmentToInactiveUserIsRejected} above covers the same ground from the other
+     * side; together they establish that neither condition is standing in for the other.
+     */
+    @Test
+    @DisplayName("holding the permission does not make a deactivated account assignable")
+    void bothConditionsAreCheckedIndependently() throws Exception {
+        Application application = givenApplication();
+        User inactiveAgent = givenInactiveUser("IT_SUPPORT");
+        long id = ((Number) read(createTicket(tokenFor(givenUser("EMPLOYEE")), application.getId(), "LOW"),
+                "$.id")).longValue();
+
+        mockMvc.perform(authenticated(put("/api/tickets/" + id + "/assign/" + inactiveAgent.getId()),
+                        tokenFor(givenUser("IT_SUPPORT"))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detail").value(
+                        org.hamcrest.Matchers.containsString("deactivated")));
     }
 
     @Test

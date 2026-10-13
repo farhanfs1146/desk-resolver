@@ -51,7 +51,7 @@ public class OpenApiConfig {
                                 "Bearer " prefix, which Swagger UI adds itself.
 
                                 Endpoints assert permissions rather than roles, and a user holds any \
-                                number of roles whose permissions are unioned. GET /api/roles is the \
+                                number of roles whose permissions are union. GET /api/roles is the \
                                 authoritative role-to-permission table. A token names a session, so \
                                 POST /api/auth/logout stops it working immediately rather than at \
                                 expiry.

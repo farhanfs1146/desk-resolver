@@ -26,7 +26,7 @@ public record SecurityProperties(
 ) {
 
     public SecurityProperties {
-        jwt = jwt == null ? new Jwt(null, null, null) : jwt;
+        jwt = jwt == null ? new Jwt(null, null, null, false) : jwt;
         cors = cors == null ? new Cors(null, false) : cors;
         bootstrapAdmin = bootstrapAdmin == null ? new BootstrapAdmin(null, null, null) : bootstrapAdmin;
         rateLimit = rateLimit == null
@@ -64,7 +64,16 @@ public record SecurityProperties(
      * @param issuer   the {@code iss} claim this service puts in tokens and requires when validating
      * @param ttl      how long an access token stays valid
      */
-    public record Jwt(String secret, String issuer, Duration ttl) {
+    /**
+     * @param secret               HS256 signing key; at least {@link #MINIMUM_SECRET_BYTES} bytes
+     * @param issuer               the {@code iss} claim this application mints and validates
+     * @param ttl                  access-token lifetime, which is also the session lifetime
+     * @param allowGeneratedSecret whether a missing {@link #secret} may be replaced by a random
+     *                             per-JVM key instead of refusing to start. See
+     *                             {@code SecurityConfig.signingKey()} for why the default is
+     *                             {@code false}.
+     */
+    public record Jwt(String secret, String issuer, Duration ttl, boolean allowGeneratedSecret) {
 
         public static final int MINIMUM_SECRET_BYTES = 32;
 

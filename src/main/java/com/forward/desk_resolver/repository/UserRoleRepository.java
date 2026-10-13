@@ -97,6 +97,35 @@ public interface UserRoleRepository extends JpaRepository<UserRole, UserRole.Key
      *   <li>{@code <> :excludedUserId} - the question is about everyone except the user being edited.
      * </ul>
      */
+    /**
+     * Whether one user can exercise one permission right now.
+     *
+     * <p>Asked about a <em>third party</em>, which is why it exists alongside
+     * {@code CurrentUserProvider.hasPermission}: that one reads the caller's own authorities out of the
+     * security context and cannot answer anything about somebody else. This is the question
+     * {@code TicketServiceImpl.requireAssignable} needs - "may the person I am about to hand this
+     * ticket to actually progress it" - and the only way to answer it is the database.
+     *
+     * <p>Same three conditions as {@link #countOtherActiveHoldersOfPermission}: the grant has to come
+     * through an active role, and the holder has to be an active account. A permission reachable only
+     * through a deactivated role is not held. {@code exists} rather than a count, so the query stops at
+     * the first matching row instead of fanning out over every role that grants it.
+     */
+    @Query(value = """
+            select exists (
+                select 1
+                from auth.user_roles ur
+                         join auth.users u on u.id = ur.user_id and u.active = true
+                         join auth.roles r on r.id = ur.role_id and r.active = true
+                         join auth.role_permissions rp on rp.role_id = r.id
+                         join auth.permissions p on p.id = rp.permission_id
+                where ur.user_id = :userId
+                  and p.code = :permissionCode
+            )
+            """, nativeQuery = true)
+    boolean userHoldsPermission(@Param("userId") Long userId,
+                                @Param("permissionCode") String permissionCode);
+
     @Query(value = """
             select count(distinct ur.user_id)
             from auth.user_roles ur

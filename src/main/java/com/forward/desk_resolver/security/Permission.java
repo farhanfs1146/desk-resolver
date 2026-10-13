@@ -34,9 +34,12 @@ import java.util.stream.Collectors;
  * <p><strong>Why this list and no more.</strong> One permission per capability the API already
  * exposes, and these cover every endpoint it has. (This sentence used to assert an endpoint count,
  * which was already wrong and went further out of date the moment an endpoint was added - a number
- * nothing verifies is a comment that rots.) No speculative permissions for
- * features that do not exist (comments, attachments, SLA, reporting), because an unused permission is
- * an untested permission.
+ * nothing verifies is a comment that rots.) No speculative permissions for features that do not exist
+ * (SLA, reporting), because an unused permission is an untested permission.
+ *
+ * <p>Comments and attachments were on that list of things that did not exist. They do now, so they
+ * have permissions - which is the rule working rather than an exception to it: the four constants
+ * below arrived in the same change as the endpoints that assert them and the tests that exercise them.
  */
 public enum Permission {
 
@@ -94,7 +97,40 @@ public enum Permission {
     APPLICATION_READ,
 
     /** Create, update or deactivate applications. */
-    APPLICATION_MANAGE;
+    APPLICATION_MANAGE,
+
+    /**
+     * Read the discussion thread on a ticket.
+     *
+     * <p><strong>Holding it does not widen which tickets are visible.</strong> Every comment endpoint
+     * runs {@code TicketVisibilityGuard} first, so this permission governs whether a caller may use
+     * the sub-resource at all, and involvement still governs <em>whose</em> threads they reach. The two
+     * checks are deliberately separate: an endpoint annotation cannot express "this ticket", and a
+     * row-level rule cannot be read off the API surface.
+     */
+    TICKET_COMMENT_READ,
+
+    /**
+     * Add a comment to a ticket.
+     *
+     * <p>Granted to requester roles as well as support staff, which is the point of the feature: the
+     * raiser answering "which browser?" is the exchange a ticketing system exists to carry, and before
+     * this there was nowhere to put it. A comment changes no ticket field and drives no workflow, so it
+     * is the one write a requester can make on a ticket after raising it.
+     */
+    TICKET_COMMENT_CREATE,
+
+    /** List a ticket's attachments and download their contents. */
+    TICKET_ATTACHMENT_READ,
+
+    /**
+     * Attach a file to a ticket.
+     *
+     * <p>Separate from {@link #TICKET_COMMENT_CREATE} rather than folded into a single "contribute"
+     * permission. Uploading accepts bytes from a client and writes them to disk, which is a materially
+     * different thing to allow than appending text to a table - so it is revocable on its own.
+     */
+    TICKET_ATTACHMENT_UPLOAD;
 
     /** The constant names, for comparison against {@code auth.permissions.code}. */
     public static Set<String> names() {

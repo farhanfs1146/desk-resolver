@@ -16,6 +16,7 @@ import com.forward.desk_resolver.repository.ApplicationRepository;
 import com.forward.desk_resolver.repository.TicketHistoryTrackingRepository;
 import com.forward.desk_resolver.repository.TicketRepository;
 import com.forward.desk_resolver.repository.UserRepository;
+import com.forward.desk_resolver.repository.UserRoleRepository;
 import com.forward.desk_resolver.repository.projection.TicketHistoryRow;
 import com.forward.desk_resolver.repository.projection.TicketRow;
 import com.forward.desk_resolver.security.Permission;
@@ -41,10 +42,12 @@ public class TicketServiceImpl implements TicketService {
 
     private final TicketRepository ticketRepository;
     private final UserRepository userRepository;
+    private final UserRoleRepository userRoleRepository;
     private final ApplicationRepository applicationRepository;
     private final TicketHistoryTrackingRepository ticketHistoryTrackingRepository;
     private final TicketNumberGenerator ticketNumberGenerator;
     private final CurrentUserProvider currentUserProvider;
+    private final TicketVisibilityGuard ticketVisibilityGuard;
 
     // Overall Flow:
     // OPEN → ASSIGNED → IN_PROGRESS → RESOLVED → CLOSED
@@ -253,29 +256,7 @@ public class TicketServiceImpl implements TicketService {
     @Override
     @Transactional(readOnly = true)
     public TicketResponse getTicketById(Long id) {
-        TicketRow row = ticketRepository.findTicketRowById(id)
-                .orElseThrow(() -> ResourceNotFoundException.of("Ticket", id));
-
-        requireVisibility(row, id);
-        return mapRow(row);
-    }
-
-    /**
-     * Fails as "not found" when the caller may not see this ticket.
-     *
-     * @throws ResourceNotFoundException deliberately, rather than an access-denied exception - see
-     *                                   {@link #getTicketById}
-     */
-    private void requireVisibility(TicketRow row, Long ticketId) {
-        if (currentUserProvider.hasPermission(Permission.TICKET_READ_ALL)) {
-            return;
-        }
-        Long callerId = currentUserProvider.requireCurrentUserId();
-        if (!row.involves(callerId)) {
-            log.info("User {} was denied access to ticket {} (not raiser or assignee)",
-                    callerId, ticketId);
-            throw ResourceNotFoundException.of("Ticket", ticketId);
-        }
+        return mapRow(ticketVisibilityGuard.requireVisible(id));
     }
 
     /**
@@ -308,11 +289,11 @@ public class TicketServiceImpl implements TicketService {
     /**
      * One page of a ticket's audit trail (see {@link TicketService#getTicketHistory}).
      *
-     * <p>The ticket row is loaded first for one reason only: to run {@link #requireVisibility} against
-     * it. Reusing that method rather than writing a second ownership rule here is the point - a
-     * resource-level check that exists in two places is a check that eventually disagrees with itself,
-     * and the half that is wrong is the one nobody notices. A caller who may not read the ticket
-     * therefore gets the same 404 for its history, with no way to tell the two cases apart.
+     * <p>The ticket row is loaded first for one reason only: to run {@link TicketVisibilityGuard}
+     * against it. Reusing that component rather than writing a second ownership rule here is the point
+     * - a resource-level check that exists in two places is a check that eventually disagrees with
+     * itself, and the half that is wrong is the one nobody notices. A caller who may not read the
+     * ticket therefore gets the same 404 for its history, with no way to tell the two cases apart.
      *
      * <p>Costs one extra query for that check. Worth it: the alternative is an endpoint that leaks
      * whether a ticket exists, through its history, to anyone who can guess an id.
@@ -320,10 +301,7 @@ public class TicketServiceImpl implements TicketService {
     @Override
     @Transactional(readOnly = true)
     public Page<TicketHistoryResponse> getTicketHistory(Long ticketId, Pageable pageable) {
-        TicketRow row = ticketRepository.findTicketRowById(ticketId)
-                .orElseThrow(() -> ResourceNotFoundException.of("Ticket", ticketId));
-
-        requireVisibility(row, ticketId);
+        ticketVisibilityGuard.requireVisible(ticketId);
 
         return ticketHistoryTrackingRepository.findHistoryRows(ticketId, pageable)
                 .map(TicketServiceImpl::mapHistoryRow);
@@ -489,11 +467,50 @@ public class TicketServiceImpl implements TicketService {
      * @throws InvalidReferenceException (400) - same family as an unknown assignee id, which this
      *                                  method sits directly after
      */
+    /**
+     * Refuses an assignee who cannot do anything with the ticket.
+     *
+     * <p>Two conditions, for the same reason: an assignment that cannot be acted on parks the ticket
+     * with a phantom owner. It reads as {@code ASSIGNED}, disappears from every unassigned-work view,
+     * and nobody is able to move it.
+     *
+     * <ul>
+     *   <li><strong>The account must be active.</strong> Somebody who cannot sign in cannot work a
+     *       ticket.
+     *   <li><strong>The account must hold {@link Permission#TICKET_STATUS_CHANGE}.</strong> Progressing
+     *       a ticket <em>is</em> changing its status, so an assignee without that permission is handed
+     *       work the API will refuse to let them record.
+     * </ul>
+     *
+     * <p><strong>This reverses an earlier decision, deliberately.</strong> Assignment to any active
+     * account used to be allowed, on the argument that it means "this needs something from you" and
+     * that {@code TICKET_READ_OWN} is documented as covering a ticket the user is assigned to. The
+     * second half of that argument still holds and is untouched: {@code TicketRow.involves} remains
+     * role-agnostic, so whoever is in {@code assigned_to} can read the ticket whatever their roles are.
+     * What changed is the first half. "This needs something from you" is a <em>comment</em>, and
+     * comments are now a first-class thing a requester can leave on a ticket they are involved in -
+     * which is the capability that argument was really reaching for, and it never needed the assignee
+     * field. Assignment means ownership of the work, and ownership without the ability to progress it
+     * is a dead end rather than a request.
+     *
+     * <p>The read half keeps its own coverage: {@code ResourceAccessControlIT.assigneeCanRead} seeds
+     * the assignee directly, so it still pins {@code involves} for a requester-role assignee - rows
+     * like that can exist from before this check, and the read path has to stay correct for them.
+     */
     private void requireAssignable(User assignee) {
         if (!Boolean.TRUE.equals(assignee.getActive())) {
             log.info("Rejected assignment to deactivated user {}", assignee.getId());
             throw new InvalidReferenceException(
                     "assigned user id refers to a deactivated account: " + assignee.getId());
+        }
+        if (!userRoleRepository.userHoldsPermission(
+                assignee.getId(), Permission.TICKET_STATUS_CHANGE.name())) {
+            log.info("Rejected assignment to user {}: no active role grants {}",
+                    assignee.getId(), Permission.TICKET_STATUS_CHANGE);
+            throw new InvalidReferenceException(
+                    "assigned user id refers to an account that cannot progress a ticket: "
+                            + assignee.getId() + " holds no active role granting "
+                            + Permission.TICKET_STATUS_CHANGE.name());
         }
     }
 

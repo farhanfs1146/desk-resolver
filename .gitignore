@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# if want the images exclude as well then apply on this data folder otherwise remain as is:
+#data/**/*
