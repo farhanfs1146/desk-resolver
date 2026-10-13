@@ -37,7 +37,7 @@ spring:
 # Server
 # ---------------------------------------------------------------------------
 server:
-  port: 9092
+  port: 9211
 
 # ---------------------------------------------------------------------------
 # Security
@@ -45,9 +45,14 @@ server:
 app:
   security:
     jwt:
-      # Must be supplied in shared/production environments.
+      # Required. With no secret the application REFUSES TO START, because a generated
+      # key fails silently: tokens work until a restart, then stop, and never validate
+      # on a second instance.
       # Minimum 32 bytes.
       secret: ${APP_JWT_SECRET:}
+      # Single developer machine escape hatch: generate a random key per JVM instead of
+      # failing. Every token dies on restart. Never enable this anywhere shared.
+      allow-generated-secret: ${APP_JWT_ALLOW_GENERATED_SECRET:false}
       issuer: desk-resolver
       ttl: 30m
 
@@ -56,8 +61,10 @@ app:
       allowed-origins: ${APP_CORS_ORIGINS:http://localhost:4200}
       allow-credentials: false
 
-    # Swagger/OpenAPI is public for development/demo.
-    # Set to false in production.
+    # Whether /v3/api-docs and /swagger-ui/** are reachable without a token.
+    # Default false: the document enumerates every endpoint, its parameters and the
+    # permission each one asserts, which is a map of the application's attack surface.
+    # Set APP_SWAGGER_PUBLIC=true for local development or a demo environment.
     swagger-public: ${APP_SWAGGER_PUBLIC:true}
 
     # -------------------------------------------------------------------------
@@ -101,3 +108,52 @@ app:
       # Only enable when running behind a trusted reverse proxy
       # that correctly appends X-Forwarded-For.
       trust-forwarded-headers: ${APP_TRUST_FORWARDED_HEADERS:false}
+
+# ---------------------------------------------------------------------------
+# Attachment storage
+# ---------------------------------------------------------------------------
+app.storage:
+  attachments:
+    # Where uploaded files are written. The default is relative to the working
+    # directory, which suits a developer machine and nothing else: a container would
+    # lose every file on restart, and two instances would not see each other's uploads.
+    # Set this to durable, shared storage in any real deployment - or replace
+    # LocalAttachmentStorage with an object-store implementation of AttachmentStorage,
+    # which is what the interface exists for.
+    directory: ${APP_ATTACHMENT_DIR:./data/attachments}
+
+    # Per-file ceiling enforced by the application, which answers 400 with the limit
+    # in the message. Keep it below spring.servlet.multipart.max-file-size below, so
+    # the readable error is the one a client normally meets.
+    max-file-size: ${APP_ATTACHMENT_MAX_FILE_SIZE:10MB}
+
+    # Allow-list of accepted content types. An unlisted type is refused: this fails
+    # closed, unlike a deny-list, which has to be complete to work at all.
+    #
+    # NOTE: the value matched is the Content-Type the client sent, not the file's
+    # actual contents - nothing is sniffed. That is why downloads are always served
+    # as Content-Disposition: attachment, never inline.
+    allowed-content-types:
+      - image/png
+      - image/jpeg
+      - image/gif
+      - image/webp
+      - application/pdf
+      - text/plain
+      - text/csv
+      - application/zip
+      - application/msword
+      - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+      - application/vnd.ms-excel
+      - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+
+# ---------------------------------------------------------------------------
+# Multipart
+# ---------------------------------------------------------------------------
+# The container-level backstop. Deliberately a little above the application's own
+# limit: this one stops an enormous body from being buffered at all and answers 413
+# with no knowledge of the application, while the smaller app limit produces the 400
+# that names the real ceiling.
+spring.servlet.multipart:
+  max-file-size: ${APP_MULTIPART_MAX_FILE_SIZE:12MB}
+  max-request-size: ${APP_MULTIPART_MAX_REQUEST_SIZE:13MB}

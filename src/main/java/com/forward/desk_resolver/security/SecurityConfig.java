@@ -160,6 +160,23 @@ public class SecurityConfig {
         return new BCryptPasswordEncoder();
     }
 
+    /**
+     * Resolves the HS256 signing key, or refuses to start.
+     *
+     * <p><strong>A missing secret is a startup failure, not a warning.</strong> It used to be a
+     * warning: the application generated a random key per JVM and logged loudly about it. That was
+     * chosen so a developer could clone the repository and run it, and it was wrong for one reason -
+     * the failure it produces does not look like a configuration failure. The application starts,
+     * logins succeed, tokens are issued, and then every token stops working after a restart and none
+     * of them validates on a second instance. Behind a load balancer that is an intermittent 401 that
+     * follows no pattern a reader can see, and the log line explaining it scrolled past hours earlier.
+     *
+     * <p>A refused startup is the same mistake reported at the moment it is made, by the component
+     * that can name it. The convenience it costs is restored by one explicit opt-in,
+     * {@code app.security.jwt.allow-generated-secret}, which is what a developer machine sets and what
+     * nothing shared should: the flag has to be turned on deliberately, so it cannot be the thing
+     * nobody noticed.
+     */
     private SecretKey signingKey() {
         if (properties.jwt().hasSecret()) {
             byte[] keyBytes = properties.jwt().secret().getBytes(StandardCharsets.UTF_8);
@@ -173,16 +190,27 @@ public class SecurityConfig {
             return new SecretKeySpec(keyBytes, JWS_ALGORITHM.getName());
         }
 
-        // No secret configured: generate a strong ephemeral one rather than falling back to a
-        // predictable default. Secure, but deliberately noisy, because tokens will not survive a
-        // restart and will not validate across instances.
+        if (!properties.jwt().allowGeneratedSecret()) {
+            throw new IllegalStateException("""
+                    app.security.jwt.secret is not configured, so no access token could be signed in a \
+                    way that survives a restart or validates on a second instance. Set it from the \
+                    environment (APP_JWT_SECRET) to at least \
+                    """
+                    + SecurityProperties.Jwt.MINIMUM_SECRET_BYTES
+                    + " bytes. On a single developer machine, where losing every token on restart is "
+                    + "acceptable, set app.security.jwt.allow-generated-secret=true "
+                    + "(APP_JWT_ALLOW_GENERATED_SECRET) to generate a random key per JVM instead.");
+        }
+
+        // Opted in. Generate a strong ephemeral key rather than falling back to a predictable default -
+        // the opt-in is about the key's lifetime, never about its quality.
         byte[] random = new byte[SecurityProperties.Jwt.MINIMUM_SECRET_BYTES];
         new SecureRandom().nextBytes(random);
         log.warn("""
-                app.security.jwt.secret is not configured. A random signing key was generated for this \
-                JVM. Access tokens will be invalidated by a restart and will not validate on another \
-                instance. Set app.security.jwt.secret (for example from the APP_JWT_SECRET environment \
-                variable) in any shared or production environment.""");
+                app.security.jwt.allow-generated-secret is enabled and no secret is configured, so a \
+                random signing key was generated for this JVM. Access tokens will be invalidated by a \
+                restart and will not validate on another instance. Never enable this outside a single \
+                developer machine; set app.security.jwt.secret (APP_JWT_SECRET) instead.""");
         return new SecretKeySpec(random, JWS_ALGORITHM.getName());
     }
 
@@ -222,8 +250,13 @@ public class SecurityConfig {
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept"));
         // Without this a browser client cannot read the pagination metadata added in Phase 3.
+        //
+        // Content-Disposition joins them for attachment downloads: it is not a CORS-safelisted
+        // response header either, so without it a cross-origin client receives the bytes and cannot
+        // see the filename to save them under.
         configuration.setExposedHeaders(List.of(
-                "X-Total-Count", "X-Total-Pages", "X-Page-Number", "X-Page-Size", "X-Has-Next"));
+                "X-Total-Count", "X-Total-Pages", "X-Page-Number", "X-Page-Size", "X-Has-Next",
+                "Content-Disposition"));
         configuration.setAllowCredentials(properties.cors().allowCredentials());
         configuration.setMaxAge(3600L);
 

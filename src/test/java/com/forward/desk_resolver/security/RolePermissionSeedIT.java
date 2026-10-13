@@ -31,17 +31,44 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class RolePermissionSeedIT extends AbstractPostgresIT {
 
-    private static final Set<String> REQUESTER = Set.of(
-            "TICKET_CREATE", "TICKET_READ_OWN", "APPLICATION_READ");
+    /**
+     * Granted to every role by {@code V19}, so they belong in all three sets below rather than
+     * distinguishing any of them.
+     *
+     * <p>Named for what the wide grant means: participating in a ticket's thread is not a privilege
+     * level. Which tickets a caller can participate in is decided per row by
+     * {@code TicketVisibilityGuard}, not by holding these - see {@code TicketCommentIT} and
+     * {@code TicketAttachmentIT}, which are what stop this from being merely asserted here.
+     */
+    private static final Set<String> PARTICIPATION = Set.of(
+            "TICKET_COMMENT_READ", "TICKET_COMMENT_CREATE",
+            "TICKET_ATTACHMENT_READ", "TICKET_ATTACHMENT_UPLOAD");
 
-    private static final Set<String> SUPPORT_STAFF = Set.of(
-            "TICKET_CREATE", "TICKET_READ_OWN", "APPLICATION_READ",
-            "TICKET_READ_ALL", "TICKET_STATUS_CHANGE", "TICKET_ASSIGN", "USER_READ");
+    private static final Set<String> REQUESTER = union(
+            Set.of("TICKET_CREATE", "TICKET_READ_OWN", "APPLICATION_READ"), PARTICIPATION);
 
-    private static final Set<String> ADMINISTRATOR = Set.of(
-            "TICKET_CREATE", "TICKET_READ_OWN", "APPLICATION_READ",
-            "TICKET_READ_ALL", "TICKET_STATUS_CHANGE", "TICKET_ASSIGN", "USER_READ",
-            "USER_MANAGE", "APPLICATION_MANAGE");
+    private static final Set<String> SUPPORT_STAFF = union(REQUESTER, Set.of(
+            "TICKET_READ_ALL", "TICKET_STATUS_CHANGE", "TICKET_ASSIGN", "USER_READ"));
+
+    private static final Set<String> ADMINISTRATOR = union(SUPPORT_STAFF, Set.of(
+            "USER_MANAGE", "APPLICATION_MANAGE"));
+
+    /**
+     * Builds each set from the one below it.
+     *
+     * <p>The three used to be written out longhand, which repeated the requester permissions three
+     * times and the support ones twice. That was readable until a permission was granted to all seven
+     * roles: adding it meant editing three literals identically, and getting one wrong would have
+     * produced a failure pointing at the seed rather than at the test. Composing them states the
+     * relationship the seed actually has - each tier is the one below plus something - and
+     * {@code administrator()} still asserts {@code containsAll} independently, so the composition is
+     * not the only thing claiming it.
+     */
+    private static Set<String> union(Set<String> base, Set<String> additional) {
+        Set<String> combined = new java.util.HashSet<>(base);
+        combined.addAll(additional);
+        return Set.copyOf(combined);
+    }
 
     @Autowired
     private PermissionDefinitionRepository permissionDefinitionRepository;
@@ -94,6 +121,26 @@ class RolePermissionSeedIT extends AbstractPostgresIT {
 
         assertThat(grants.get("ADMIN")).isEqualTo(ADMINISTRATOR);
         assertThat(grants.get("ADMIN")).containsAll(grants.get("IT_SUPPORT"));
+    }
+
+    /**
+     * The one thing {@code V19} grants that no tier distinguishes.
+     *
+     * <p>Asserted separately from the per-tier sets because it is a different claim: those say what
+     * each role holds, this says these four are deliberately uniform. A later seed that gave
+     * {@code TICKET_COMMENT_CREATE} only to support staff would still satisfy a tier comparison
+     * somebody had updated to match it, and would quietly leave requesters unable to answer a question
+     * on their own ticket - which is the feature.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"TICKET_COMMENT_READ", "TICKET_COMMENT_CREATE",
+            "TICKET_ATTACHMENT_READ", "TICKET_ATTACHMENT_UPLOAD"})
+    @DisplayName("every role can comment and attach, because participation is not a privilege level")
+    void participationIsGrantedToEveryRole(String permission) {
+        assertThat(grantsByRole()).allSatisfy((role, granted) ->
+                assertThat(granted)
+                        .as("role %s must hold %s", role, permission)
+                        .contains(permission));
     }
 
     @Test

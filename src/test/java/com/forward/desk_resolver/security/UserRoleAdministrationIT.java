@@ -359,7 +359,10 @@ class UserRoleAdministrationIT extends AbstractPostgresIT {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(7))
                 .andExpect(jsonPath("$[0].code").value("ADMIN"))
-                .andExpect(jsonPath("$[0].permissions.length()").value(9));
+                // ADMIN holds every permission there is, so this is the enum's size rather than a
+                // literal - which also keeps it true the next time one is added. RolePermissionSeedIT
+                // is what asserts the specific contents.
+                .andExpect(jsonPath("$[0].permissions.length()").value(Permission.values().length));
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.forward.desk_resolver.common.exception;
 import com.forward.desk_resolver.common.identity.MissingUserIdentityException;
 import com.forward.desk_resolver.security.InvalidCredentialsException;
 import com.forward.desk_resolver.security.ratelimit.TooManyLoginAttemptsException;
+import com.forward.desk_resolver.storage.AttachmentNotStoredException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -16,6 +17,10 @@ import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+// Spring Framework 7 keeps both of these under web.multipart; MissingServletRequestPartException is
+// in multipart.support, not web.bind where the other request-binding exceptions live.
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.ErrorResponseException;
@@ -73,6 +78,21 @@ public class GlobalExceptionHandler {
     }
 
     /** Bean validation failures on {@code @Valid @RequestBody} arguments. */
+    /**
+     * An uploaded file this application will not store.
+     *
+     * <p>400 rather than 413: the request is well-formed and within the transport limits, and it is the
+     * file's own properties - empty, oversized for the application's rule, or a disallowed content type
+     * - that are unacceptable. A 413 is reserved for the container refusing a body it would not even
+     * buffer, which is {@link #handleUploadTooLarge}. The detail is the exception's own message because
+     * it names the limit or the allowed types, which is what a client has to show the user.
+     */
+    @ExceptionHandler(InvalidUploadException.class)
+    public ProblemDetail handleInvalidUpload(InvalidUploadException e) {
+        log.debug("Rejected upload: {}", e.getMessage());
+        return problem(HttpStatus.BAD_REQUEST, "Upload rejected", e.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ProblemDetail handleValidation(MethodArgumentNotValidException e) {
         Map<String, String> violations = new LinkedHashMap<>();
@@ -177,6 +197,55 @@ public class GlobalExceptionHandler {
         log.debug("Not acceptable: {}", e.getMessage());
         return problem(HttpStatus.NOT_ACCEPTABLE, "Not acceptable",
                 "This endpoint produces application/json.");
+    }
+
+    /**
+     * A multipart body the servlet container refused before any handler ran.
+     *
+     * <p>Distinct from {@link #handleInvalidUpload}: that is the application's own size rule, applied
+     * to a file it has already received. This is {@code spring.servlet.multipart.max-file-size}, which
+     * exists so an enormous body is never buffered at all - so by the time it fires, no controller has
+     * been reached and nothing knows which ticket was involved. Hence the generic detail: the specific
+     * limit is the one the application reports in the 400 case.
+     *
+     * <p>Without this handler the exception reaches the catch-all as a 500, which would blame the server
+     * for a request the server correctly declined.
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ProblemDetail handleUploadTooLarge(MaxUploadSizeExceededException e) {
+        log.info("Multipart request refused as too large by the container");
+        return problem(HttpStatus.PAYLOAD_TOO_LARGE, "Upload too large",
+                "The uploaded file exceeds the maximum request size this server accepts.");
+    }
+
+    /**
+     * A multipart request missing the part a handler requires.
+     *
+     * <p>Shaped as a missing-parameter 400 on purpose, naming the part: the common cause is a client
+     * posting a file under a different field name, and "required part 'file' is missing" is the only
+     * message that makes that fixable without reading the controller.
+     */
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ProblemDetail handleMissingPart(MissingServletRequestPartException e) {
+        log.debug("Missing multipart part: {}", e.getRequestPartName());
+        return problem(HttpStatus.BAD_REQUEST, "Missing parameter",
+                "Required multipart part '" + e.getRequestPartName() + "' is missing.");
+    }
+
+    /**
+     * A row whose stored file is gone, or unreadable.
+     *
+     * <p>A 500, and correctly so: the client asked for an attachment this application told them it
+     * had. It is logged at error with the key, because it means the database and the storage directory
+     * have diverged - a restored backup, a cleared volume, a blob removed by hand - and that is an
+     * operational problem rather than anything the caller can act on. The response therefore says only
+     * that it could not be retrieved.
+     */
+    @ExceptionHandler(AttachmentNotStoredException.class)
+    public ProblemDetail handleAttachmentNotStored(AttachmentNotStoredException e) {
+        log.error("An attachment row does not resolve to readable bytes", e);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR, "Attachment unavailable",
+                "The attachment could not be retrieved.");
     }
 
     @ExceptionHandler(DuplicateResourceException.class)
