@@ -44,6 +44,7 @@ class BootstrapAdminIT extends AbstractPostgresIT {
                 new SecurityProperties.Jwt("test-signing-key-at-least-32-bytes", "desk-resolver",
                         Duration.ofMinutes(30), false),
                 null,
+                null,
                 new SecurityProperties.BootstrapAdmin(email, password, "Bootstrap Administrator"),
                 null,
                 null,

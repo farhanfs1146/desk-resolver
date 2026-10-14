@@ -4,7 +4,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Entity
 @Table(name = "ticket_history_tracking")
@@ -40,6 +40,6 @@ public class TicketHistoryTracking {
     private String remarks;
 
     @Column(name = "changed_at", nullable = false)
-    private LocalDateTime changedAt;
+    private Instant changedAt;
 
 }

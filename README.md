@@ -17,6 +17,7 @@ environment; the defaults in `src/main/resources/application.yaml` target local 
 | `DB_USERNAME` / `DB_PASSWORD` | `postgres` / `postgres` | |
 | `APP_JWT_SECRET` | *(none)* | **Required.** HS256 signing key, minimum 32 bytes. With no secret the application **refuses to start** — see below. |
 | `APP_JWT_ALLOW_GENERATED_SECRET` | `false` | Developer-machine escape hatch: generate a random key per JVM instead of failing. Every token dies on restart and none validates on another instance. Never enable anywhere shared. |
+| `APP_REFRESH_TTL` | `8h` | How long a login may be renewed without a password. **Absolute** — refreshing never extends it. One working shift; see below. |
 | `APP_CORS_ORIGINS` | `http://localhost:4200` | Exact origins, never a wildcard. |
 | `APP_SWAGGER_PUBLIC` | `false` | Set `true` for local development or a demo. The API description is a map of the attack surface, so exposure is opt-in. |
 | `APP_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | *(none)* | Both required to create the first ADMIN. See below. |
@@ -76,9 +77,19 @@ the bootstrap fails loudly instead of creating an administrator who holds nothin
 
 ## Authentication
 
-`POST /api/auth/login` with `{"email":..., "password":...}` returns a signed bearer token. Send it as
-`Authorization: Bearer <token>` on every other endpoint — it is the only endpoint reachable without
-one. `POST /api/auth/logout` ends the session the token belongs to.
+`POST /api/auth/login` with `{"email":..., "password":...}` returns **two** credentials:
+
+| Field | What it is | Lifetime |
+| --- | --- | --- |
+| `accessToken` | Signed JWT. Send as `Authorization: Bearer <token>` on every other endpoint. | `30m` |
+| `refreshToken` | Opaque single-use token. POST it to `/api/auth/refresh` to get a new pair, no password. | `8h`, absolute |
+
+`/api/auth/login` and `/api/auth/refresh` are the only endpoints reachable without an access token, for
+the same reason — both exist to produce one. Neither is *unauthenticated*: login demands a password and
+refresh demands a 256-bit single-use token this application issued.
+
+`POST /api/auth/logout` ends the **whole login** — the current session and every one rotated out of it,
+so neither credential works on the next request.
 
 ### Roles and permissions
 
@@ -128,9 +139,14 @@ revoked or expired, or when the account has been deactivated.
 
 That makes three things real that the previous stateless-only model could not do:
 
-- **Logout** actually ends the session, rather than asking the client to forget the token.
+- **Logout** actually ends the login, rather than asking the client to forget the token.
 - **A password change revokes every session the user holds**, the current one included.
 - **Deactivating an account** ends its live sessions instead of leaving them usable until expiry.
+
+Since `V21` a session also carries the refresh token that replaces it, chained by a `family_id`: one
+login plus every token rotated out of it. A refresh **inserts** a session rather than updating one, so
+the rows of a family are the history of a single login, and revoking the family is what logout and
+reuse detection both do.
 
 The filter chain is still `STATELESS`: no cookie, no `HttpSession`. Signature, expiry and issuer are
 checked first, exactly as before; the session is a second gate.
@@ -138,8 +154,41 @@ checked first, exactly as before; the session is a second gate.
 Sessions are kept for `APP_SESSION_RETENTION` after expiry and then purged on a schedule, so there is
 something to look at when asking which sessions existed around an incident.
 
-There are **no refresh tokens**. A token lasts 30 minutes by default and re-authentication is a fresh
-login; see [`docs/DECISIONS.md`](docs/DECISIONS.md).
+### Refreshing a session
+
+`POST /api/auth/refresh` with `{"refreshToken": "..."}` returns a fresh pair — the same body as login,
+so a client builds the same state from either.
+
+Three rules, and all three matter to whoever writes the client:
+
+**The token rotates.** Every call returns a new refresh token and kills the one presented. Replace what
+you stored; never keep both.
+
+**Presenting a used token revokes the entire login.** A refresh token is usable exactly once, so a
+second presentation means two parties hold it and one of them copied it. Nothing on the server can say
+which, so every session descended from that login is revoked and both have to log in again. This is the
+point of rotating at all — rotation on its own only shortens a window; what it buys is the signal.
+
+**Refreshing cannot extend the window.** `refreshExpiresIn` counts down towards zero across the day,
+because the cap is measured from the original login. After `APP_REFRESH_TTL` a password is required
+again, whatever happened in between. Read that field to warn somebody *before* their session ends
+rather than after.
+
+The old access token is **not** killed by a refresh — it expires on its own `exp`, at most 30 minutes
+later. That is deliberate: a browser with requests already in flight when it rotates should not collect
+401s for them. What dies immediately is the credential that can mint more tokens.
+
+> **The client must single-flight refreshes.** One refresh in flight at a time, with every other request
+> queued behind it. Several requests meeting a 401 together is the normal case, not an edge case, and
+> firing a refresh for each means all but one lose the race and get a 401 they will read as "log the
+> user out". The server keeps the session alive through that — losing a race is not treated as reuse —
+> so the only thing that breaks is a client that did not queue.
+
+**Where to keep them:** access token in memory only, refresh token in `sessionStorage`. Not
+`localStorage`, and deliberately not an `HttpOnly` cookie — the reasoning, including what that costs, is
+in [`docs/DECISIONS.md`](docs/DECISIONS.md) under *Token storage in the browser*. The same section
+assigns a strict `Content-Security-Policy` to whatever serves the SPA, which is the control that
+actually reduces XSS risk.
 
 ## API
 
@@ -149,6 +198,7 @@ produced inside the security filter chain.
 | Method | Path | Permission |
 | --- | --- | --- |
 | `POST` | `/api/auth/login` | public |
+| `POST` | `/api/auth/refresh` | public (takes a refresh token) |
 | `POST` | `/api/auth/logout` | authenticated |
 | `POST` | `/api/tickets` | `TICKET_CREATE` |
 | `GET` | `/api/tickets` | `TICKET_READ_OWN` |
@@ -273,13 +323,13 @@ endpoint.
 
 ```bash
 ./mvnw test      # 106 unit tests, no infrastructure needed, ~2s
-./mvnw verify    # the above plus 200 integration tests in a PostgreSQL container
+./mvnw verify    # the above plus 220 integration tests in a PostgreSQL container
 ```
 
 Integration tests are named `*IT` and run under failsafe, so **`mvn test` does not run them** - use
 `mvn verify` before pushing.
 
-They need Docker. Each run starts one throwaway `postgres:18-alpine` container, applies all 19
+They need Docker. Each run starts one throwaway `postgres:18-alpine` container, applies all 21
 migrations to it and lets Hibernate validate the mappings against the result, so the migrations and the
 entity mappings are themselves under test. **No test touches a local database.** Attachments are
 written to a temporary directory, so no run touches `./data/attachments` either.
@@ -300,14 +350,15 @@ so all of them are exercised against the real schema rather than a stub.
 | `LocalAttachmentStorageTest` | generated keys, extension validation, and the keys that escape the storage root - which cannot be reached through the API, so only a unit test can send them |
 | `SafeFileNameTest` | what a client filename is reduced to before it reaches a column and a `Content-Disposition` header |
 | `ResourceAccessControlIT` | the IDOR/BOLA boundaries: 404 rather than 403, list scoping, per-role endpoint permissions |
-| `TicketLifecycleIT` | create/assign/status, `resolvedAt` rules, audit trail, severity sorting, optimistic locking |
+| `TicketLifecycleIT` | create/assign/status, `resolvedAt` rules, audit trail, severity sorting, optimistic locking, that every name in a response is accompanied by an id on both mappers, and that timestamps serialize as ISO-8601 instants rather than epoch numbers |
 | `AuthenticationIT` | uniform login failure, throttling, password change, duplicate detection |
 | `ApiErrorHandlingIT` | every status mapping, and that no response leaks internals |
 | `TicketStatusAndModuleIT` | the module-belongs-to-application rule, the status body and `remarks`, the no-op status change |
 | `ApplicationCatalogueIT` | catalogue uniqueness and NOT NULL (V15), and that the dead `ticket_history` table is gone (V16) |
-| `OpenApiDocumentIT` | that the document declares the bearer scheme Swagger UI needs for its Authorize button, that the requirement is global, and that login opts out while logout does not |
+| `OpenApiDocumentIT` | that the document declares the bearer scheme Swagger UI needs for its Authorize button, that the requirement is global, and that login and refresh opt out while logout does not |
 | `BootstrapAdminIT` | the first-administrator flow: that the created account can log in and actually manage users, and that the three guards hold - already-an-admin, unconfigured, email taken |
-| `SessionLifecycleIT` | revocation: logout, revoke-all-on-password-change, deactivation ending live sessions, an expired session, a validly signed token with no `sid`, a subject/session mismatch, and the purge |
+| `SessionLifecycleIT` | revocation: logout, revoke-all-on-password-change, deactivation ending live sessions, an expired session, a validly signed token with no `sid`, a subject/session mismatch, and the purge - including that it spares a session whose refresh window is still open |
+| `RefreshTokenIT` | rotation, and mostly the refusals: single use, that reusing a token revokes the whole login, that an unknown token revokes nothing, the absolute cap, a missing refresh window, a deactivated account, logout and password change killing the refresh token, and that losing a concurrency race is a 401 rather than reuse |
 | `UserRoleAdministrationIT` | several roles per user and the union rule, creating and replacing role sets, unknown role codes, the roleless account, role deactivation, the `USER_MANAGE` lockout guard, and that a grant records its grantor |
 | `TicketCommentIT` | the thread end to end, that both sides can take part, that a comment changes nothing about the ticket, chronological ordering, and that involvement - not the permission - decides whose thread you reach |
 | `TicketAttachmentIT` | upload/list/download, the three refusals, that a generated path cannot be steered by a traversal filename, that an attachment is bound to its ticket, and the row-whose-file-is-gone case |
@@ -319,14 +370,16 @@ If Testcontainers cannot find Docker on Docker Desktop for Windows, point it at 
 ## Decisions and open questions
 
 [`docs/DECISIONS.md`](docs/DECISIONS.md) records the open business questions (status transitions,
-department-scoped visibility), the limitations accepted deliberately (no token revocation, per-instance
-throttling, deep-page cost), and the security headers that were reviewed and rejected.
+department-scoped visibility), the limitations accepted deliberately (per-instance throttling,
+deep-page cost), the security headers that were reviewed and rejected, and — in §7 — the two changes
+`V20` made to what the API reports, with the earlier reasoning each one overturns.
+
+Two entries there are worth reading before writing a client: *Token storage in the browser*, which
+decides where each credential lives and why not a cookie, and §2's refresh-token entry, which explains
+reuse detection and the one thing a client must not get wrong.
 
 ## Known gaps
 
-- **No refresh tokens.** A token lasts 30 minutes and then the client logs in again. Sessions made
-  revocation possible but do not extend anything; rotating refresh tokens would be the next step and
-  `auth.sessions` is where they would live.
 - **Login throttling is per-instance** (in-memory), so it weakens if the app is scaled out.
 - **Attachment storage is per-instance.** `LocalAttachmentStorage` writes to a local directory, so a
   file uploaded through one instance is not readable from another unless `APP_ATTACHMENT_DIR` points at

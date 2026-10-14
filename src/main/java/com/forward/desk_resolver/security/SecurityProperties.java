@@ -9,6 +9,7 @@ import java.util.List;
  * Externalised security configuration. Nothing here has a hardcoded secret.
  *
  * @param jwt            access-token settings
+ * @param refresh        refresh-token settings
  * @param cors           browser origins permitted to call the API
  * @param bootstrapAdmin optional first administrator, so a fresh deployment is usable
  * @param rateLimit      login abuse protection
@@ -18,6 +19,7 @@ import java.util.List;
 @ConfigurationProperties(prefix = "app.security")
 public record SecurityProperties(
         Jwt jwt,
+        Refresh refresh,
         Cors cors,
         BootstrapAdmin bootstrapAdmin,
         RateLimit rateLimit,
@@ -27,6 +29,7 @@ public record SecurityProperties(
 
     public SecurityProperties {
         jwt = jwt == null ? new Jwt(null, null, null, false) : jwt;
+        refresh = refresh == null ? new Refresh(null) : refresh;
         cors = cors == null ? new Cors(null, false) : cors;
         bootstrapAdmin = bootstrapAdmin == null ? new BootstrapAdmin(null, null, null) : bootstrapAdmin;
         rateLimit = rateLimit == null
@@ -84,6 +87,40 @@ public record SecurityProperties(
 
         public boolean hasSecret() {
             return secret != null && !secret.isBlank();
+        }
+    }
+
+    /**
+     * How long a refresh chain may live.
+     *
+     * <p><strong>Eight hours, which is a working day rather than a round number.</strong> The access
+     * token stays at thirty minutes - that is the window a leaked one is usable for, and it should be
+     * short. This is the different question of how long somebody may keep working without typing their
+     * password again, and the honest answer for an internal help desk is: one shift. Sign in on
+     * arrival, go home, sign in again tomorrow.
+     *
+     * <p>The two values are independent on purpose. Lengthening {@code jwt.ttl} to avoid interruptions
+     * was the only lever before refresh tokens existed, and it traded security for convenience in the
+     * wrong direction: a thirty-minute token refreshed sixteen times is far better than one eight-hour
+     * token, because every rotation is a chance to detect theft and a point at which revocation takes
+     * effect.
+     *
+     * <p>Seven days was considered and rejected. It is the usual default, and it is sized for consumer
+     * applications where re-authenticating is friction a product team is measured on. Here the
+     * credential would sit in browser storage overnight and over a weekend to save a user one login per
+     * week, which is not a trade worth making - and it is the figure that would have to be defended to
+     * whoever asks why a stolen laptop still had a live session on Monday.
+     *
+     * <p>This is an <strong>absolute</strong> cap, not a sliding one: {@code SessionService.rotate}
+     * copies the expiry forward unchanged, so the chain dies this long after the login that started it
+     * however often it rotates.
+     *
+     * @param ttl lifetime of a refresh chain, measured from the login that began it
+     */
+    public record Refresh(Duration ttl) {
+
+        public Refresh {
+            ttl = ttl == null ? Duration.ofHours(8) : ttl;
         }
     }
 

@@ -38,7 +38,7 @@ public interface TicketRepository extends JpaRepository<Ticket, Long>, TicketQue
                 t.id, t.ticketNumber, t.title, t.description, t.issueType, t.priority, t.status,
                 t.businessImpact, t.expectedBy, t.createdAt, t.updatedAt, t.resolvedAt,
                 raiser.fullName, assignee.fullName, app.appName, t.moduleName,
-                raiser.id, assignee.id)
+                raiser.id, assignee.id, app.id)
             from Ticket t
                 join t.raisedBy raiser
                 left join t.assignedTo assignee

@@ -4,7 +4,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Builder;
 import lombok.Data;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * One attachment's metadata. The bytes come from
@@ -32,5 +32,5 @@ public class TicketAttachmentResponse {
     @Schema(description = "Full name of the user who uploaded it", example = "Farhan Ali")
     private String uploadedBy;
 
-    private LocalDateTime uploadedAt;
+    private Instant uploadedAt;
 }

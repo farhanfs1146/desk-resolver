@@ -82,7 +82,11 @@ public class TicketQueryRepositoryImpl implements TicketQueryRepository {
                 application.get("appName"),
                 ticket.get("moduleName"),
                 raiser.get("id"),
-                assignee.get("id")));
+                assignee.get("id"),
+                // The FK column on tickets, not application.get("id") on the joined relation - the
+                // same reason the predicates below read association ids off the root: Hibernate
+                // renders it as tickets.application_id and adds no join.
+                ticket.get("application").get("id")));
 
         List<Predicate> predicates = predicates(cb, ticket, filter);
         if (restrictToUserId != null) {

@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -40,7 +41,21 @@ public class SessionService {
          * alive would only half-answer the case it exists for - someone who believes their session has
          * been stolen - and the client has the new password, so re-authenticating costs them one step.
          */
-        PASSWORD_CHANGED
+        PASSWORD_CHANGED,
+
+        /**
+         * A refresh token was presented twice, so the family it belongs to was ended.
+         *
+         * <p>A refresh token is usable exactly once. A second presentation means two parties hold one
+         * single-use credential, and nothing on the server can tell the owner from whoever copied it -
+         * so both lose the login. The legitimate user logs in again; the attacker loses a credential
+         * that had hours left on it.
+         *
+         * <p>Unlike the other two, this reason is <em>evidence</em> rather than bookkeeping, and it is
+         * the only one nobody asked for. A run of these rows against one account is the signature of a
+         * token that leaked.
+         */
+        REFRESH_TOKEN_REUSED
     }
 
     private static final int CLIENT_IP_MAX = 64;
@@ -62,27 +77,102 @@ public class SessionService {
      * them twice would let the session and the token it describes expire at marginally different
      * moments, which is the sort of discrepancy that produces a bug report nobody can reproduce.
      *
+     * <p>A login roots a new family, and the refresh token issued alongside the access token is stored
+     * here as a digest - see {@link RefreshTokenService} for why a digest, and why SHA-256.
+     *
+     * @param refreshTokenHash digest of the refresh token handed to the client; the token itself is
+     *                         never stored
+     * @param refreshExpiresAt the absolute end of this chain. Copied unchanged by every subsequent
+     *                         {@link #rotate}, so refreshing cannot extend it.
      * @return the session, whose id goes into the token's {@code sid} claim
      */
     @Transactional
     public UserSession open(Long userId, Instant issuedAt, Instant expiresAt,
+                            String refreshTokenHash, Instant refreshExpiresAt,
                             String clientIp, String userAgent) {
+        UUID id = UUID.randomUUID();
+        // A login roots its own family. Generating a second UUID would allow a session whose family
+        // nothing else ever belongs to - the same value under two names, and one more thing to keep
+        // consistent for no gain.
+        return write(id, id, userId, issuedAt, expiresAt,
+                refreshTokenHash, refreshExpiresAt, clientIp, userAgent);
+    }
+
+    /**
+     * Opens the session that succeeds another one, in the same family.
+     *
+     * <p><strong>Rotation inserts; it does not update.</strong> The previous row keeps its own
+     * {@code expires_at}, so the access token a client is still holding stays valid until it expires on
+     * its own - a browser with two requests in flight at the moment it refreshes does not collect 401s
+     * for them. What stops immediately is the previous refresh token, which this method marks used in
+     * the same transaction as the insert - so a client can never end up holding a dead token and no
+     * successor.
+     *
+     * <p>{@code refreshExpiresAt} is <strong>copied from the predecessor, not recomputed</strong>, and
+     * that one line is what makes the refresh window absolute: a chain cannot outlive
+     * {@code app.security.refresh.ttl} measured from the login that started it, however many times it
+     * rotates. Deriving a fresh expiry here would mean a session somebody uses every day never expires,
+     * which is the property that turns one stolen refresh token into permanent access.
+     *
+     * @param previous         the session being rotated out; supplies the family and the absolute cap
+     * @param refreshTokenHash digest of the new refresh token returned to the client
+     * @return the new session, whose id becomes the new access token{@code 's} {@code sid}, or empty
+     *         when a concurrent request claimed the same refresh token first
+     */
+    @Transactional
+    public Optional<UserSession> rotate(UserSession previous, Instant issuedAt, Instant expiresAt,
+                                        String refreshTokenHash, String clientIp, String userAgent) {
+        // The conditional UPDATE is the concurrency control for the whole refresh path, not
+        // bookkeeping. Two requests presenting the same token can both read a row that looks usable;
+        // this is what decides between them, because only one can find refresh_used_at null and set it.
+        //
+        // Returning empty therefore means "somebody else rotated this token first", which is NOT the
+        // same situation as finding the row already marked when it was read. That one is reuse and
+        // revokes the family. The caller has to keep the two apart - see AuthServiceImpl.refresh.
+        if (sessionRepository.markRefreshUsed(previous.getId(), Instant.now()) != 1) {
+            log.info("Refresh token for session {} was claimed by a concurrent request", previous.getId());
+            return Optional.empty();
+        }
+        return Optional.of(write(UUID.randomUUID(), previous.getFamilyId(), previous.getUserId(),
+                issuedAt, expiresAt,
+                refreshTokenHash, previous.getRefreshExpiresAt(),
+                clientIp, userAgent));
+    }
+
+    private UserSession write(UUID id, UUID familyId, Long userId,
+                              Instant issuedAt, Instant expiresAt,
+                              String refreshTokenHash, Instant refreshExpiresAt,
+                              String clientIp, String userAgent) {
         UserSession session = new UserSession();
-        session.setId(UUID.randomUUID());
+        session.setId(id);
+        session.setFamilyId(familyId);
         session.setUserId(userId);
         session.setIssuedAt(issuedAt);
         session.setExpiresAt(expiresAt);
+        session.setRefreshTokenHash(refreshTokenHash);
+        session.setRefreshExpiresAt(refreshExpiresAt);
         session.setClientIp(truncate(clientIp, CLIENT_IP_MAX));
         session.setUserAgent(truncate(userAgent, USER_AGENT_MAX));
         return sessionRepository.save(session);
     }
 
-    /** Ends one session. A second call for the same session is a no-op, not an error. */
+    /**
+     * Ends the login the given session belongs to - that session and every other one rotated out of
+     * the same original login.
+     *
+     * <p><strong>The family, not the one session, and that is a correction rather than a widening.</strong>
+     * This used to revoke a single row, which was the same thing while a login <em>was</em> a single
+     * session. Since V21 it is a chain, so revoking one row would have left the refresh token that
+     * mints the next access token alive: logging out would not have logged the caller out, and the
+     * tests asserting that it did would have kept passing, because they log in once and never refresh.
+     *
+     * <p>A second call is a no-op, not an error.
+     */
     @Transactional
-    public void revoke(UUID sessionId, RevocationReason reason) {
-        int ended = sessionRepository.revoke(sessionId, Instant.now(), reason.name());
+    public void revokeLogin(UUID sessionId, RevocationReason reason) {
+        int ended = sessionRepository.revokeFamilyOfSession(sessionId, Instant.now(), reason.name());
         if (ended > 0) {
-            log.info("Session {} revoked ({})", sessionId, reason);
+            log.info("Revoked {} session(s) in the family of session {} ({})", ended, sessionId, reason);
         }
     }
 
@@ -96,6 +186,25 @@ public class SessionService {
         int ended = sessionRepository.revokeAllForUser(userId, Instant.now(), reason.name());
         if (ended > 0) {
             log.info("Revoked {} session(s) for user {} ({})", ended, userId, reason);
+        }
+        return ended;
+    }
+
+    /**
+     * Ends every live session descended from one login.
+     *
+     * <p>Two callers, for two different reasons. Logout uses it because a person logging out means the
+     * login ends, not the 30-minute slice of it they happen to be holding - after a few refreshes those
+     * are different things. Reuse detection uses it because it cannot tell the thief from the owner, so
+     * the only safe answer is that neither of them keeps the session.
+     *
+     * @return how many were ended
+     */
+    @Transactional
+    public int revokeFamily(UUID familyId, RevocationReason reason) {
+        int ended = sessionRepository.revokeFamily(familyId, Instant.now(), reason.name());
+        if (ended > 0) {
+            log.info("Revoked {} session(s) in family {} ({})", ended, familyId, reason);
         }
         return ended;
     }

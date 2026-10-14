@@ -1,6 +1,6 @@
 package com.forward.desk_resolver.repository.projection;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * Flat read projection for a ticket's attachment list - metadata only.
@@ -11,7 +11,8 @@ import java.time.LocalDateTime;
  * key and publishing it would invite a request that tries to supply one. The download path reads the
  * entity, not this.
  *
- * <p>Same for the uploader: a name, no id. See {@link TicketCommentRow}.
+ * <p>Same for the uploader: a name, no id. See {@link TicketCommentRow}, which records the reasoning
+ * and the fact that {@code TicketResponse} deliberately diverges from it.
  */
 public record TicketAttachmentRow(
         Long id,
@@ -19,6 +20,6 @@ public record TicketAttachmentRow(
         String fileType,
         Long sizeBytes,
         String uploadedByFullName,
-        LocalDateTime uploadedAt
+        Instant uploadedAt
 ) {
 }

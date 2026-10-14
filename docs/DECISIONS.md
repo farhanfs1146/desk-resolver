@@ -20,8 +20,10 @@ tables that were empty because the feature did not exist yet.
 
 **Entries struck through have been answered or resolved.** They are kept rather than deleted: an
 argument that turned out to be wrong is the one most worth being able to read, and a decision that was
-reversed should not look like it was never made. §1's assignee question and §5 in full are both
-reversals of what this file previously recorded.
+reversed should not look like it was never made. §1's assignee question, §2's refresh tokens, §5 in
+full, and both halves of §7 are all reversals of what this file previously recorded — §7's timestamp
+entry quotes the paragraph it overturns, because the premise of that paragraph is what changed rather
+than its logic.
 
 ---
 
@@ -135,16 +137,129 @@ identity provider remains a change to `SecurityConfig.jwtDecoder` plus retiring 
 but its tokens would carry no `sid`, so the session gate would have to be rethought at the same time.
 That is the honest price of having made it a gate rather than an optimisation.
 
-### No refresh tokens
+### ~~No refresh tokens~~ — resolved in V21
 
-A token lasts 30 minutes and then the client authenticates again. Sessions made revocation possible;
-they do not extend anything.
+**This limitation is gone.** The reasoning that produced it is kept because it named its own successor
+precisely: *"rotating refresh tokens are the standard answer and `auth.sessions` is where they would
+live"*, not built because they are *"a design in their own right (rotation, reuse detection, a second
+credential to store in a browser safely)"*. All three had to be settled, and they were, in that order.
 
-Rotating refresh tokens are the standard answer and `auth.sessions` is where they would live — the
-table already has the identity, the lifetime and the revocation columns such a scheme needs. They are
-not built because they are a design in their own right (rotation, reuse detection, a second credential
-to store in a browser safely) and nothing has asked for one. The cost in the meantime is that an active
-user re-authenticates every half hour.
+**What forced it was writing down what the cost actually was.** "An active user re-authenticates every
+half hour" reads like friction and is not. The access token expires on a clock the user cannot see, so
+the 401 lands mid-task — characteristically on the POST submitting a ticket description somebody spent
+ten minutes writing. No client can recover from that: re-authenticating needs a password, and all a SPA
+can offer is a login form over the top of the work in progress. The limitation was not an inconvenience
+budget, it was a data-loss bug waiting for a front end to exist.
+
+**The design, and the three questions it had to answer.**
+
+*Rotation.* A refresh does not update a session in place. It marks the current row's refresh token used
+and inserts a new session — new `sid`, new access token, new refresh token — carrying the same
+`family_id`. A family is one login and everything descended from it. The predecessor is marked used but
+**not revoked**, so the access token a client is still holding stays valid until its own `exp`: a
+browser with two requests in flight when it rotates does not collect 401s for them.
+
+*Reuse detection.* Rotation alone only shortens a window; the signal is what it buys. A refresh token is
+usable exactly once, so a second presentation means two parties hold it and one of them copied it.
+Nothing on the server can say which, so the whole family is revoked and both have to log in. That is the
+intended trade: one interruption for the user, and an eight-hour credential destroyed for the attacker.
+
+`refresh_used_at` is what makes this detectable, and it is why rotation marks rather than deletes. Note
+the branch that is easy to collapse and must not be: *the row was already marked when it was read* is
+reuse, while *the row looked usable but the conditional `UPDATE` lost the race* is a client that fired
+twice — a single page does this trivially when three requests get 401 together. The first revokes the
+family; the second is a plain 401 and the session survives. Revoking there would log people out for
+double-clicking.
+
+*A second credential to store in a browser safely.* See **Token storage in the browser** below, which is
+the half of this that lives in the front end.
+
+**Absolute, not sliding.** `refresh_expires_at` is copied forward unchanged on every rotation, so a
+chain dies `app.security.refresh.ttl` after the login that began it however often it refreshes. A
+sliding expiry would mean a session somebody uses daily never expires, which is precisely what turns one
+stolen refresh token into permanent access.
+
+**Why 8 hours and not 7 days.** The access token stays at 30 minutes — that is how long a leaked one is
+usable for, and refresh tokens remove the last reason anyone had to lengthen it. Eight hours answers the
+different question of how long somebody may work without typing their password, and one working shift is
+the honest answer for an internal help desk: sign in on arrival, sign in again tomorrow. Seven days is
+the usual default and is sized for consumer products where re-authentication is friction a team is
+measured on; here it would leave a live credential in browser storage overnight and over a weekend to
+save one login a week. It is also the number that would have to be defended to whoever asks why a stolen
+laptop still had a live session on Monday.
+
+**A SHA-256 of the token is stored, not a BCrypt hash** — which inverts the rule `users.password_hash`
+follows, deliberately. BCrypt is slow because a password is low-entropy and guessable; a refresh token is
+256 bits of `SecureRandom` output, so there is nothing to enumerate and the cost would be paid on every
+refresh for nothing. More decisively, BCrypt salts per row, so the matching session could only be found
+by verifying the candidate against every row in the table. A fast digest is the wrong choice for a
+password and the right one here, and the difference is the entropy of the input.
+
+**What it cost.** A row per refresh rather than a row per login, which the existing purge absorbs — and
+that purge had to grow a second condition, because a session now outlives its own access token and the
+row is the only place its refresh token exists. `POST /api/auth/refresh` is reachable without an access
+token, necessarily: by the time a client calls it, the one it holds has expired. It is not
+*unauthenticated* — it demands a 256-bit single-use credential this application issued.
+
+**Logout changed meaning with it.** It revokes the family, not the one session. Those were the same thing
+while a login *was* a single session; now a caller five refreshes into their day holds the newest
+session, and revoking only that one would leave the refresh token that mints the next access token
+alive. Logging out would not have logged them out — and the existing tests would have kept passing,
+because they log in once and never refresh.
+
+**What is deliberately still missing.** An idle timeout — it would log out everybody returning from
+lunch, and the absolute cap is the control that matters for an internal tool. Binding a token to a device
+or address — `client_ip` and `user_agent` are already recorded and already documented as never trusted
+for a decision, since both are forged trivially and both change legitimately. And rate limiting on the
+refresh endpoint: the credential is 256 bits, so guessing is not the threat, and a failed refresh is one
+indexed `SELECT` where a failed login is a BCrypt verification. `RefreshTokenIT` covers the refusals,
+which is where nearly all of the behaviour is.
+
+### Token storage in the browser
+
+Not a backend limitation, but the backend decided it, so it is recorded here rather than left to
+whoever writes the front end first.
+
+**The decision: the access token lives in memory only, the refresh token in `sessionStorage`.**
+
+The access token is a JavaScript variable — a signal, a service field, not persisted anywhere. It
+survives no reload, which is fine, because the refresh token exists to rebuild it. The refresh token is
+the one that must survive F5, so it goes in `sessionStorage`: scoped to the tab, gone when the tab
+closes, and never attached to a request by the browser on its own.
+
+**`localStorage` was rejected.** It persists across tabs and across browser restarts, so a token that
+should die with the tab instead outlives the machine being walked away from.
+
+**An `HttpOnly` cookie is the stronger option on paper, and was still rejected.** Injected JavaScript
+cannot read one, so an XSS could not carry the token away for later use. Three things weigh against it:
+
+1. **It would cost the property this API is built on.** A cookie is an *ambient* credential — the browser
+   attaches it to cross-site requests by itself. "No ambient credential exists" is the entire stated
+   justification for CSRF protection being disabled (`SecurityConfig`), so one cookie means bringing CSRF
+   protection back, turning `allowCredentials` on, and losing the guarantee that a cross-site request
+   cannot be authenticated at all. That is a large change to the most load-bearing property in the
+   security model, for one field.
+2. **The protection is narrower than it sounds.** An XSS that cannot read the cookie can still call
+   `/api/auth/refresh` from the page and use what comes back. It stops the token being *exfiltrated*, not
+   the session being *used*. The marginal gain is "the attacker loses access when the tab closes" — real,
+   and much smaller than the usual framing.
+3. **Anything that can read `sessionStorage` can equally read the in-memory access token**, and act as
+   the user for 30 minutes either way.
+
+**So the controls that actually matter are elsewhere, and three of them are already decided.** A strict
+`Content-Security-Policy` on whatever serves the SPA — which §3 of this document already assigns there,
+on the grounds that a JSON API renders nothing — is what reduces the probability of an XSS in the first
+place. The 8-hour absolute cap bounds how long a stolen refresh token is worth anything. Reuse detection
+means that using a copied token destroys the session for whoever copied it.
+
+**What the front end must do, and it is not optional.** Single-flight the refresh: one refresh in flight
+at a time, every other request queued behind it. Several requests meeting a 401 together is the normal
+case, not an edge case, and firing a refresh for each means all but one lose the race and get a 401 they
+will read as "log the user out". The server keeps the session alive through that — losing a race is not
+treated as reuse — so the only thing that breaks is a client that did not queue.
+
+**Revisit this if** the SPA is ever served from the same origin as the API. That removes the CORS half of
+objection 1 and makes a `SameSite=Strict`, refresh-only cookie considerably cheaper to adopt.
 
 ### Login throttling is per-instance
 
@@ -496,3 +611,85 @@ Two points that belong with the decisions above:
   user holds `ADMIN`, so it cannot be used to reset an existing administrator's password by restarting
   with different configuration. Change the password through `PATCH /api/users/me/password` afterwards and
   unset the variables.
+
+---
+
+## 7. The API's data types (V20)
+
+Two changes to what the API *says*, as opposed to what it does. Both were made now rather than later
+for the same reason: there is no front end yet, so the cost is a migration and a recompile. Both get
+considerably more expensive the day a browser client depends on the old shape.
+
+### Ticket timestamps are instants, not wall-clock times
+
+V17 drew this distinction and took the other side of it, in writing:
+
+> `TIMESTAMPTZ` here, `TIMESTAMP` elsewhere — a deliberate break from the convention in V3/V7. These
+> columns are security lifetimes [...] Ticket timestamps are business data read by humans and keep their
+> type.
+
+**That reasoning was sound and its premise expired.** "Read by humans" meant one office and one clock. A
+`TIMESTAMP` column stores the digits `14:30` and nothing else — not which `14:30`, and not whose — so
+the moment two branches on different offsets read the same ticket:
+
+- **"Raised at 14:30" means two different moments** and neither reader can tell. Nothing fails and
+  nothing is logged; the field is simply wrong about when something happened, which is the one thing it
+  exists to say — and the field an SLA would be measured from.
+- **`ORDER BY created_at` stops being chronological** once rows are written by instances in different
+  zones, so the triage queue silently mis-orders.
+- **`tickets.created_at` and `auth.sessions.issued_at` could not be compared.** Two timestamps about the
+  same request, and only one of them named a moment.
+
+Pakistan Standard Time has observed no DST since 2009, which is why nothing had broken yet: there is no
+repeated or skipped local hour for the conversion to resolve arbitrarily. A deployment in a DST zone
+would not have been so lucky, and that is the second half of what this closes.
+
+**Java-side it is `Instant`, not `OffsetDateTime`.** Hibernate maps both to `TIMESTAMP_UTC`, so the
+column is the same either way; the difference is what the API hands a client. `OffsetDateTime` would
+carry *an* offset, but not a meaningful one — PostgreSQL renders `TIMESTAMPTZ` in the session's zone, so
+the offset a client received would describe the database server's configuration and nothing about the
+ticket. `Instant` states the moment and leaves the rendering to the only party that knows who is
+looking: the browser. `TicketLifecycleIT.timestampsAreIsoInstants` pins the wire format, because it is
+decided by Jackson configuration rather than by any code here and nothing else would notice it changing.
+
+**One breaking input change, kept rather than softened.** `CreateTicketRequest.expectedBy` now requires
+an offset or `Z`; a bare `2026-10-20T17:00:00` is a 400 naming the field. It used to be accepted and
+interpreted in whatever zone the server's JVM ran in — a deadline whose meaning depended on where the
+application was deployed. There is no zone the API could substitute that would be right more often than
+wrong, and the client always knows the one the person typing meant.
+
+**The migration names its conversion zone as a literal**, because a bare `ALTER COLUMN ... TYPE
+TIMESTAMPTZ` reinterprets the existing digits in the *database session's* zone, which is a separate
+setting from the JVM's and is commonly UTC in a container. It would have been right only by coincidence
+and wrong by whole hours without saying so. A Flyway placeholder was considered and rejected: it moves a
+value the migration must be read to understand into `application.yaml`, where the one person who needs
+to change it is least likely to be looking.
+
+### Responses identify people and applications, not just name them
+
+`TicketResponse` carried `raisedBy`, `assignedTo` and `applicationName` as bare display strings. It now
+carries `raisedById`, `assignedToId` and `applicationId` alongside them.
+
+This was a defect rather than a minimal API:
+
+- **Names are not unique.** `auth.users.full_name` has no unique constraint and real directories contain
+  repeats, so two colleagues with the same name were indistinguishable in a queue — including when
+  deciding whether a ticket was one's own. `applications.app_name` is explicitly non-unique too;
+  `ApplicationPageRequests` appends `id` as a sort tiebreaker for exactly that reason.
+- **Nothing could be navigated to.** `GET /api/users/{id}` takes an id, and so do `?assignedTo=` and
+  `?raisedBy=`. With only a name, a client wanting "other tickets by this person" had to fetch the whole
+  user directory and match on a string — an N+1 over a list, keyed on a value that is not a key.
+
+The names stay, because they are what a list renders and resolving them client-side would be that same
+N+1 in the other direction. Both halves cost nothing: the two user ids were already on `TicketRow` for
+authorization, and all three are foreign-key columns on `tickets` itself, so no query changed shape.
+
+**`TicketCommentResponse`, `TicketAttachmentResponse` and `TicketHistoryResponse` still report people by
+name only**, and that is now the minority position in the codebase rather than the rule. It is left
+deliberately: visibility of a thread is decided by the ticket, so unlike `TicketRow` there is no
+authorization question an id would answer, and nothing reads one yet. An unused field is an untested
+field — the same rule V17 applies to speculative permissions. If a client needs to attribute a comment
+to a user record rather than render a name, the id belongs there and costs nothing, because
+`commented_by` is already joined. It is **not** withheld because exposing it would be unsafe:
+`GET /api/users/{id}` needs `USER_READ`, which no requester role holds, and the ids are sequential
+bigints nobody has to be told about to guess.
