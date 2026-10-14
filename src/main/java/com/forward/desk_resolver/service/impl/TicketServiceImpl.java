@@ -30,7 +30,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 
@@ -77,7 +77,7 @@ public class TicketServiceImpl implements TicketService {
     public TicketResponse createTicket(CreateTicketRequest request) {
 
         User raisedBy = requireCurrentUser();
-        LocalDateTime now = now();
+        Instant now = now();
 
         Application application = applicationRepository.findById(request.getApplicationId())
                 .orElseThrow(() -> InvalidReferenceException.of("applicationId", request.getApplicationId()));
@@ -534,8 +534,11 @@ public class TicketServiceImpl implements TicketService {
                 .updatedAt(row.updatedAt())
                 .resolvedAt(row.resolvedAt())
                 .raisedBy(row.raisedByFullName())
+                .raisedById(row.raisedByUserId())
                 .assignedTo(row.assignedToFullName())
+                .assignedToId(row.assignedToUserId())
                 .applicationName(row.applicationName())
+                .applicationId(row.applicationId())
                 .moduleName(row.moduleName())
                 .build();
     }
@@ -559,6 +562,7 @@ public class TicketServiceImpl implements TicketService {
                 .updatedAt(ticket.getUpdatedAt())
                 .resolvedAt(ticket.getResolvedAt())
                 .raisedBy(ticket.getRaisedBy().getFullName())
+                .raisedById(ticket.getRaisedBy().getId())
                 // Restored (audit finding P1-7). This line was commented out, so the API reported
                 // assignedTo as null even when the database held an assignee - an engineer reading
                 // the API saw an unassigned ticket that was in fact assigned. Null-safe because an
@@ -566,7 +570,14 @@ public class TicketServiceImpl implements TicketService {
                 .assignedTo(ticket.getAssignedTo() != null
                         ? ticket.getAssignedTo().getFullName()
                         : null)
+                // Null for the same reason and on the same condition. Reading the id off the lazy
+                // proxy touches no row: Hibernate answers getId() from the foreign key it already
+                // holds, so this does not undo the projection work by initialising the association.
+                .assignedToId(ticket.getAssignedTo() != null
+                        ? ticket.getAssignedTo().getId()
+                        : null)
                 .applicationName(ticket.getApplication().getAppName())
+                .applicationId(ticket.getApplication().getId())
                 .moduleName(ticket.getModuleName())
                 .build();
     }
@@ -584,17 +595,20 @@ public class TicketServiceImpl implements TicketService {
      * which also removes two redundant lookups per write.
      */
     /**
-     * The current time at the precision the database stores.
+     * The current instant at the precision the database stores.
      *
-     * <p>PostgreSQL {@code TIMESTAMP} keeps microseconds; {@code LocalDateTime.now()} on this platform
+     * <p>PostgreSQL {@code TIMESTAMPTZ} keeps microseconds; {@code Instant.now()} on this platform
      * produces finer than that. Writing the unrounded value meant a create or status-change response
      * carried digits that were dropped on the way to disk, so the timestamp a client read from the
      * response did not equal the one it read back a moment later - a difference no client could explain
      * and nothing in the application reported. Rounding here rather than at each call site keeps every
      * timestamp this service writes comparable with the stored value and with each other.
+     *
+     * <p>The type changed from {@code LocalDateTime} to {@code Instant} in V20; the truncation did not,
+     * because it was never about the type. It is about the column's precision, which is unchanged.
      */
-    private static LocalDateTime now() {
-        return LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
+    private static Instant now() {
+        return Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     private void saveHistory(

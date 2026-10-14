@@ -233,12 +233,8 @@ class SessionLifecycleIT extends AbstractPostgresIT {
         User user = givenUser("EMPLOYEE");
         tokenFor(user);
 
-        UserSession stale = new UserSession();
-        stale.setId(UUID.randomUUID());
-        stale.setUserId(user.getId());
-        stale.setIssuedAt(Instant.now().minus(40, ChronoUnit.DAYS));
-        stale.setExpiresAt(Instant.now().minus(40, ChronoUnit.DAYS));
-        userSessionRepository.save(stale);
+        UserSession stale = seedSession(user.getId(),
+                Instant.now().minus(40, ChronoUnit.DAYS), null);
 
         assertThat(userSessionRepository.findAll()).hasSize(2);
 
@@ -246,5 +242,44 @@ class SessionLifecycleIT extends AbstractPostgresIT {
 
         assertThat(userSessionRepository.findAll()).hasSize(1);
         assertThat(userSessionRepository.findById(stale.getId())).isEmpty();
+    }
+
+    /**
+     * A session whose access token expired long ago but whose refresh window is still open survives
+     * the purge.
+     *
+     * <p>Since V21 a session outlives its own access token, and the row is the only place its refresh
+     * token exists - so purging on {@code expires_at} alone would delete a live credential and log a
+     * working user out mid-session. Not under the shipped settings, where the retention window (7 days)
+     * is far longer than the refresh window (8 hours), but silently the first time somebody lengthens
+     * one or shortens the other. That coupling between two unrelated properties is what the second half
+     * of the predicate removes, and this is the test that holds it there.
+     */
+    @Test
+    @DisplayName("the purge leaves a session alone while its refresh window is still open")
+    void purgeSparesSessionsWithALiveRefreshWindow() throws Exception {
+        User user = givenUser("EMPLOYEE");
+
+        UserSession refreshable = seedSession(user.getId(),
+                Instant.now().minus(40, ChronoUnit.DAYS),
+                Instant.now().plus(1, ChronoUnit.HOURS));
+
+        sessionService.purgeExpiredSessions();
+
+        assertThat(userSessionRepository.findById(refreshable.getId())).isPresent();
+    }
+
+    /** A session row written directly, so the purge can be given a history it could not otherwise have. */
+    private UserSession seedSession(Long userId, Instant expiredAt, Instant refreshExpiresAt) {
+        UserSession session = new UserSession();
+        UUID id = UUID.randomUUID();
+        session.setId(id);
+        // Its own family, like any login. NOT NULL since V21, so this cannot be left out.
+        session.setFamilyId(id);
+        session.setUserId(userId);
+        session.setIssuedAt(expiredAt);
+        session.setExpiresAt(expiredAt);
+        session.setRefreshExpiresAt(refreshExpiresAt);
+        return userSessionRepository.save(session);
     }
 }

@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ClientIpResolverTest {
 
     private static ClientIpResolver resolver(boolean trustForwardedHeaders) {
-        return new ClientIpResolver(new SecurityProperties(null, null, null,
+        return new ClientIpResolver(new SecurityProperties(null, null, null, null,
                 new SecurityProperties.RateLimit(true, 5, 20,
                         Duration.ofMinutes(15), Duration.ofMinutes(15), 1_000, trustForwardedHeaders),
                 null,

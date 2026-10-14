@@ -36,7 +36,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
@@ -269,8 +269,8 @@ public abstract class AbstractPostgresIT {
         ticket.setIssueType(IssueType.BUG);
         ticket.setPriority(Priority.HIGH);
         ticket.setStatus(assignedTo == null ? TicketStatus.OPEN : TicketStatus.ASSIGNED);
-        ticket.setCreatedAt(LocalDateTime.now());
-        ticket.setUpdatedAt(LocalDateTime.now());
+        ticket.setCreatedAt(Instant.now());
+        ticket.setUpdatedAt(Instant.now());
         ticket.setRaisedBy(raisedBy);
         ticket.setAssignedTo(assignedTo);
         ticket.setApplication(application);
@@ -280,18 +280,41 @@ public abstract class AbstractPostgresIT {
 
     // ------------------------------------------------------------------ http helpers
 
-    /** Authenticates through the real login endpoint and returns the bearer token. */
-    protected String tokenFor(User user) throws Exception {
+    /**
+     * Authenticates through the real login endpoint and returns the whole response.
+     *
+     * <p>Separate from {@link #tokenFor} because a login now issues two credentials. Most tests want
+     * the access token and nothing else; the ones about refresh need {@code $.refreshToken} and the two
+     * lifetimes, and none of them should have to restate the request body to get at them.
+     */
+    protected MvcResult login(User user) throws Exception {
         String body = """
                 {"email":"%s","password":"%s"}""".formatted(user.getEmail(), PASSWORD);
 
-        MvcResult result = mockMvc.perform(post("/api/auth/login")
+        return mockMvc.perform(post("/api/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isOk())
                 .andReturn();
+    }
 
-        return read(result, "$.accessToken");
+    /** Authenticates through the real login endpoint and returns the bearer token. */
+    protected String tokenFor(User user) throws Exception {
+        return read(login(user), "$.accessToken");
+    }
+
+    /** The refresh token from a fresh login. */
+    protected String refreshTokenFor(User user) throws Exception {
+        return read(login(user), "$.refreshToken");
+    }
+
+    /** Exchanges a refresh token, without asserting the outcome. */
+    protected MvcResult refresh(String refreshToken) throws Exception {
+        return mockMvc.perform(post("/api/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken":"%s"}""".formatted(refreshToken)))
+                .andReturn();
     }
 
     /**

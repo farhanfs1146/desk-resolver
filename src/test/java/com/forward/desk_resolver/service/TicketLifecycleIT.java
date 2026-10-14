@@ -74,6 +74,63 @@ class TicketLifecycleIT extends AbstractPostgresIT {
                 .andExpect(jsonPath("$.resolvedAt").doesNotExist());
     }
 
+    /**
+     * Every person and application a ticket names is identified as well as named.
+     *
+     * <p><strong>Why this is worth asserting on both read paths.</strong> There are two mappers -
+     * {@code mapRow} for the projections the list and detail endpoints use, and {@code mapToResponse}
+     * for the write paths, which legitimately hold the entity in order to mutate it. They build the
+     * same DTO from different sources, so a field added to one and forgotten in the other produces an
+     * API that reports an id when a ticket is created and {@code null} when the same ticket is read
+     * back. Nothing fails; a client just sees a field that is sometimes there.
+     *
+     * <p>{@code assignedToId} in particular has to be null exactly when {@code assignedTo} is. Audit
+     * finding P1-7 was this DTO reporting a null assignee for a ticket that had one, and the two
+     * fields drifting apart would be the same defect wearing a different field name.
+     */
+    @Test
+    @DisplayName("ids accompany every name, on the write path and the read path alike")
+    void responsesCarryIdsAsWellAsNames() throws Exception {
+        Application application = givenApplication();
+        User raiser = givenUser("EMPLOYEE");
+
+        MvcResult created = mockMvc.perform(authenticated(post("/api/tickets"), tokenFor(raiser))
+                        .content(createBody(application.getId(), "HIGH")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.raisedById").value(raiser.getId()))
+                .andExpect(jsonPath("$.applicationId").value(application.getId()))
+                // Unassigned, so both halves of the pair are absent rather than one of them.
+                .andExpect(jsonPath("$.assignedTo").doesNotExist())
+                .andExpect(jsonPath("$.assignedToId").doesNotExist())
+                .andReturn();
+
+        int ticketId = read(created, "$.id");
+        String supportToken = tokenFor(givenUser("IT_SUPPORT"));
+        User assignee = givenUser("IT_SUPPORT");
+
+        // The write path's own mapper, with an assignee present this time.
+        mockMvc.perform(authenticated(
+                        put("/api/tickets/" + ticketId + "/assign/" + assignee.getId()), supportToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.assignedTo").value(assignee.getFullName()))
+                .andExpect(jsonPath("$.assignedToId").value(assignee.getId()));
+
+        // The projection mapper: single read...
+        mockMvc.perform(authenticated(get("/api/tickets/" + ticketId), supportToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.raisedById").value(raiser.getId()))
+                .andExpect(jsonPath("$.assignedToId").value(assignee.getId()))
+                .andExpect(jsonPath("$.applicationId").value(application.getId()));
+
+        // ...and the list, which is built by a different query again (criteria, not JPQL).
+        mockMvc.perform(authenticated(get("/api/tickets"), supportToken)
+                        .param("raisedBy", String.valueOf(raiser.getId())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].raisedById").value(raiser.getId()))
+                .andExpect(jsonPath("$[0].assignedToId").value(assignee.getId()))
+                .andExpect(jsonPath("$[0].applicationId").value(application.getId()));
+    }
+
     @Test
     @DisplayName("createdAt and updatedAt are identical on a new ticket")
     void timestampsMatchOnCreate() throws Exception {
@@ -83,8 +140,40 @@ class TicketLifecycleIT extends AbstractPostgresIT {
         String createdAt = read(result, "$.createdAt");
         String updatedAt = read(result, "$.updatedAt");
 
-        // Two separate LocalDateTime.now() calls could land in different milliseconds.
+        // Two separate Instant.now() calls could land in different microseconds.
         assertThat(createdAt).isEqualTo(updatedAt);
+    }
+
+    /**
+     * Every timestamp this API returns is an ISO-8601 instant in UTC, and that is a contract rather
+     * than an incidental formatting choice.
+     *
+     * <p><strong>Why it needs a test of its own.</strong> It is decided by Jackson configuration, not
+     * by any code in this project, so nothing else here would notice it changing. With
+     * {@code WRITE_DATES_AS_TIMESTAMPS} enabled - a one-line change, and the Jackson default without
+     * Spring Boot's opinion - an {@code Instant} serializes as {@code 1760000000.123456} instead of
+     * {@code "2026-10-14T09:33:20.123456Z"}. Both are valid JSON and both round-trip through this API,
+     * so every integration test here would still pass while every browser client broke: a number is
+     * not something {@code new Date(...)} or Angular's {@code DatePipe} can read.
+     *
+     * <p>Asserting the trailing {@code Z} also pins the half of V20 that is visible from outside. The
+     * column is {@code TIMESTAMPTZ} and PostgreSQL renders it in the session's zone, so a value
+     * arriving as {@code +05:00} would mean the instant had been passed through a local-time
+     * conversion somewhere between the database and the response.
+     */
+    @Test
+    @DisplayName("timestamps serialize as ISO-8601 instants in UTC, not epoch numbers or local times")
+    void timestampsAreIsoInstants() throws Exception {
+        Application application = givenApplication();
+        String token = tokenFor(givenUser("EMPLOYEE"));
+
+        mockMvc.perform(authenticated(post("/api/tickets"), token)
+                        .content(createBody(application.getId(), "HIGH")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.createdAt").value(org.hamcrest.Matchers.matchesPattern(
+                        "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z")))
+                .andExpect(jsonPath("$.updatedAt").value(org.hamcrest.Matchers.matchesPattern(
+                        "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z")));
     }
 
     /**

@@ -24,7 +24,7 @@ class JwtSigningKeyTest {
     private static SecurityConfig configuredWith(String secret, boolean allowGenerated) {
         return new SecurityConfig(new SecurityProperties(
                 new SecurityProperties.Jwt(secret, null, null, allowGenerated),
-                null, null, null, null, false));
+                null, null, null, null, null, false));
     }
 
     @Test

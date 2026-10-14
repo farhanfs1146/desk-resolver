@@ -4,7 +4,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Builder;
 import lombok.Data;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * One entry from a ticket's audit trail.
@@ -38,5 +38,5 @@ public class TicketHistoryResponse {
     @Schema(description = "Free-text note recorded with the change")
     private String remarks;
 
-    private LocalDateTime changedAt;
+    private Instant changedAt;
 }

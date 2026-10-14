@@ -68,6 +68,11 @@ public class SecurityConfig {
     /** Endpoints reachable without authentication. Everything not listed here requires a token. */
     private static final String[] ALWAYS_PUBLIC = {
             "/api/auth/login",
+            // Reachable without a token because by the time a client needs it, the only token it holds
+            // has expired - requiring one would make the endpoint unusable in exactly the situation it
+            // exists for. It is not unauthenticated: it demands a 256-bit single-use credential that
+            // this application issued, and refuses anything else with the same 401 as a bad password.
+            "/api/auth/refresh",
             "/error"
     };
 

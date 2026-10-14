@@ -12,7 +12,7 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * The record of one file attached to a ticket. The bytes are not here.
@@ -81,7 +81,7 @@ public class TicketAttachment {
     private Long sizeBytes;
 
     @Column(name = "uploaded_at", nullable = false)
-    private LocalDateTime uploadedAt;
+    private Instant uploadedAt;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "ticket_id", nullable = false)

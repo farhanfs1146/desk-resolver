@@ -7,7 +7,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Entity
 @Table(name = "tickets")
@@ -55,17 +55,33 @@ public class Ticket {
     @Column(name = "business_impact", length = 50)
     private String businessImpact;
 
+    /**
+     * Ticket timestamps are absolute instants, not wall-clock times.
+     *
+     * <p><strong>They used to be {@code LocalDateTime} over {@code TIMESTAMP}</strong>, and V17
+     * defended that on the grounds that ticket timestamps are "business data read by humans" while
+     * only session lifetimes needed an offset. V20 reversed it, because the argument quietly assumed
+     * one office and one clock: a {@code TIMESTAMP} column stores the digits {@code 14:30} and not
+     * which {@code 14:30}, so the same ticket read from two branches on different offsets reports two
+     * different moments and neither reader can tell. Nothing fails - the field is simply wrong about
+     * when something happened, which is the one thing it exists to say.
+     *
+     * <p>{@code Instant} maps to Hibernate's {@code TIMESTAMP_UTC}, which PostgreSQL stores as
+     * {@code TIMESTAMPTZ} - the same type {@code auth.sessions} has used since V17, so the two can now
+     * be compared. Rendering in a reader's own zone is the client's job and is deliberately not done
+     * here: the API states the moment, and only the browser knows who is looking at it.
+     */
     @Column(name = "expected_by")
-    private LocalDateTime expectedBy;
+    private Instant expectedBy;
 
     @Column(name = "created_at", nullable = false)
-    private LocalDateTime createdAt;
+    private Instant createdAt;
 
     @Column(name = "updated_at", nullable = false)
-    private LocalDateTime updatedAt;
+    private Instant updatedAt;
 
     @Column(name = "resolved_at")
-    private LocalDateTime resolvedAt;
+    private Instant resolvedAt;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "raised_by", nullable = false)

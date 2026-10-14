@@ -1,6 +1,6 @@
 package com.forward.desk_resolver.repository.projection;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /**
  * One audit entry, read as a projection.
@@ -11,7 +11,10 @@ import java.time.LocalDateTime;
  * issue a select per distinct referenced ticket and user - audit finding P1-1 reproduced on a new
  * endpoint. Selecting the actor's name directly makes a page exactly two statements.
  *
- * <p>{@code changedByFullName} mirrors how {@code TicketResponse} reports people: by name, not id.
+ * <p>{@code changedByFullName} carries the actor as a name and no id, matching
+ * {@link TicketCommentRow} - which records why, including why {@code TicketResponse} no longer does
+ * the same. An audit reader identifies a person, and the trail is read next to the ticket whose
+ * {@code raisedById} and {@code assignedToId} are already there.
  */
 public record TicketHistoryRow(
         Long id,
@@ -21,6 +24,6 @@ public record TicketHistoryRow(
         String newValue,
         String changedByFullName,
         String remarks,
-        LocalDateTime changedAt
+        Instant changedAt
 ) {
 }

@@ -2,6 +2,7 @@ package com.forward.desk_resolver.common.exception;
 
 import com.forward.desk_resolver.common.identity.MissingUserIdentityException;
 import com.forward.desk_resolver.security.InvalidCredentialsException;
+import com.forward.desk_resolver.security.InvalidRefreshTokenException;
 import com.forward.desk_resolver.security.ratelimit.TooManyLoginAttemptsException;
 import com.forward.desk_resolver.storage.AttachmentNotStoredException;
 import org.slf4j.Logger;
@@ -282,6 +283,25 @@ public class GlobalExceptionHandler {
     public ProblemDetail handleInvalidCredentials(InvalidCredentialsException e) {
         log.info("Failed authentication attempt");
         return problem(HttpStatus.UNAUTHORIZED, "Authentication failed", "Invalid email or password.");
+    }
+
+    /**
+     * A refresh token could not be exchanged.
+     *
+     * <p>401, and uninformative in exactly the same way and for exactly the same reason - every cause
+     * produces this one sentence, so the caller learns that the credential is unusable and nothing
+     * else. See {@code InvalidRefreshTokenException} for why it does not share the handler above: the
+     * detail there names a password, and there is no password anywhere in this flow.
+     *
+     * <p>Note that the <em>message carried by the exception is ignored</em>, here as above. The detail
+     * is a literal in this method, so a future caller cannot widen what a failure reveals by passing a
+     * more helpful string.
+     */
+    @ExceptionHandler(InvalidRefreshTokenException.class)
+    public ProblemDetail handleInvalidRefreshToken(InvalidRefreshTokenException e) {
+        log.info("Failed refresh attempt");
+        return problem(HttpStatus.UNAUTHORIZED, "Authentication failed",
+                "Invalid or expired refresh token.");
     }
 
     /**

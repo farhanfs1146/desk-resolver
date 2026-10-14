@@ -2,13 +2,17 @@ package com.forward.desk_resolver.service.impl;
 
 import com.forward.desk_resolver.common.identity.CurrentUserProvider;
 import com.forward.desk_resolver.dto.request.LoginRequest;
-import com.forward.desk_resolver.dto.response.LoginResponse;
+import com.forward.desk_resolver.dto.request.RefreshTokenRequest;
+import com.forward.desk_resolver.dto.response.AuthenticationResponse;
 import com.forward.desk_resolver.entity.User;
 import com.forward.desk_resolver.entity.UserSession;
 import com.forward.desk_resolver.repository.UserRepository;
 import com.forward.desk_resolver.repository.UserRoleRepository;
+import com.forward.desk_resolver.repository.UserSessionRepository;
 import com.forward.desk_resolver.security.InvalidCredentialsException;
+import com.forward.desk_resolver.security.InvalidRefreshTokenException;
 import com.forward.desk_resolver.security.JwtTokenService;
+import com.forward.desk_resolver.security.RefreshTokenService;
 import com.forward.desk_resolver.security.SecurityProperties;
 import com.forward.desk_resolver.security.SessionService;
 import com.forward.desk_resolver.security.ratelimit.ClientIpResolver;
@@ -22,6 +26,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
@@ -54,8 +59,10 @@ public class AuthServiceImpl implements AuthService {
 
     private final UserRepository userRepository;
     private final UserRoleRepository userRoleRepository;
+    private final UserSessionRepository sessionRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenService jwtTokenService;
+    private final RefreshTokenService refreshTokenService;
     private final SessionService sessionService;
     private final SecurityProperties properties;
     private final CurrentUserProvider currentUserProvider;
@@ -84,8 +91,10 @@ public class AuthServiceImpl implements AuthService {
 
     public AuthServiceImpl(UserRepository userRepository,
                            UserRoleRepository userRoleRepository,
+                           UserSessionRepository sessionRepository,
                            PasswordEncoder passwordEncoder,
                            JwtTokenService jwtTokenService,
+                           RefreshTokenService refreshTokenService,
                            SessionService sessionService,
                            SecurityProperties properties,
                            CurrentUserProvider currentUserProvider,
@@ -94,8 +103,10 @@ public class AuthServiceImpl implements AuthService {
                            HttpServletRequest httpServletRequest) {
         this.userRepository = userRepository;
         this.userRoleRepository = userRoleRepository;
+        this.sessionRepository = sessionRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtTokenService = jwtTokenService;
+        this.refreshTokenService = refreshTokenService;
         this.sessionService = sessionService;
         this.properties = properties;
         this.currentUserProvider = currentUserProvider;
@@ -107,7 +118,7 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     @Transactional
-    public LoginResponse login(LoginRequest request) {
+    public AuthenticationResponse login(LoginRequest request) {
         String clientIp = clientIpResolver.resolve(httpServletRequest);
 
         // Checked before the account is even looked up, so a refusal costs no query and no BCrypt work,
@@ -116,7 +127,7 @@ public class AuthServiceImpl implements AuthService {
                 TooManyLoginAttemptsException.class);
 
         try {
-            LoginResponse response = authenticate(request, clientIp);
+            AuthenticationResponse response = authenticate(request, clientIp);
             guard(() -> loginAttemptLimiter.recordSuccess(request.getEmail(), clientIp), null);
             return response;
         } catch (InvalidCredentialsException e) {
@@ -129,10 +140,105 @@ public class AuthServiceImpl implements AuthService {
     @Transactional
     public void logout() {
         UUID sessionId = currentUserProvider.requireCurrentSessionId();
-        sessionService.revoke(sessionId, SessionService.RevocationReason.LOGOUT);
+        sessionService.revokeLogin(sessionId, SessionService.RevocationReason.LOGOUT);
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * <p><strong>There is no {@code @Transactional} on this method, and that is load-bearing.</strong>
+     * Adding one would look like an improvement and would silently disable reuse detection. The reuse
+     * branch revokes the family and <em>then throws</em>, so under a method-level transaction the
+     * revocation would roll back with the exception: the attacker{@code 's} token would be refused once
+     * and the family it came from would stay alive, which is the whole protection gone with nothing
+     * failing anywhere.
+     *
+     * <p>So each write here is its own transaction, and each one is atomic on its own terms. The two
+     * that matter:
+     *
+     * <ul>
+     *   <li>{@code revokeFamily} is a single statement, so it commits before the throw.
+     *   <li>{@code rotate} marks the old token used and inserts the successor inside one transaction,
+     *       so a client can never be left holding a dead refresh token with no replacement.
+     * </ul>
+     *
+     * <h2>Why "already used" and "lost the race" are different outcomes</h2>
+     *
+     * Both mean this caller does not get a token, and they are worlds apart in what they imply:
+     *
+     * <ul>
+     *   <li><strong>The row was already marked when it was read</strong> - somebody rotated this token
+     *       earlier, and here it is again. A refresh token is used exactly once, so two parties hold
+     *       it. Nothing can say which of them is the owner, so the family is revoked and both have to
+     *       log in. That is the intended cost: one interruption for the user, and an eight-hour
+     *       credential destroyed for whoever copied it.
+     *   <li><strong>The row looked usable but the conditional update lost</strong> - two requests
+     *       presenting the same token arrived at once, which is a client that fired twice, not a theft.
+     *       A single page can trivially do this: three requests get 401 together and three refreshes
+     *       start. Revoking the family here would log people out for double-clicking, so this is a
+     *       plain 401 and the session survives. The sibling request that won has a valid token, which
+     *       is why a browser client must single-flight its refreshes - one in-flight refresh, with
+     *       other requests queued behind it.
+     * </ul>
+     *
+     * <p>Every failure is the same 401 problem document with the same wording, for the same reason
+     * login failures are: the only thing a caller learns is that the credential is unusable.
+     */
+    @Override
+    public AuthenticationResponse refresh(RefreshTokenRequest request) {
+        String hash = refreshTokenService.hash(request.getRefreshToken());
+
+        // Looked up whatever its state. Filtering revoked and used rows out in the query would make
+        // reuse indistinguishable from a token nobody ever issued, which is the one distinction this
+        // method exists to draw.
+        UserSession presented = sessionRepository.findByRefreshTokenHash(hash)
+                .orElseThrow(() -> {
+                    log.info("Refresh rejected: the token matches no session");
+                    return invalidRefreshToken();
+                });
+
+        if (presented.getRefreshUsedAt() != null) {
+            log.warn("Refresh token for session {} presented a second time; revoking family {}. "
+                            + "A single-use credential in two hands means one of them copied it.",
+                    presented.getId(), presented.getFamilyId());
+            sessionService.revokeFamily(
+                    presented.getFamilyId(), SessionService.RevocationReason.REFRESH_TOKEN_REUSED);
+            throw invalidRefreshToken();
+        }
+        if (presented.getRevokedAt() != null) {
+            log.info("Refresh rejected for session {}: the session was revoked ({})",
+                    presented.getId(), presented.getRevokedReason());
+            throw invalidRefreshToken();
+        }
+
+        Instant now = Instant.now();
+        // Null covers the sessions that predate V21: issued before refresh existed, so there is no
+        // chain for them to continue. Fails closed rather than treating absent as unlimited.
+        if (presented.getRefreshExpiresAt() == null || !presented.getRefreshExpiresAt().isAfter(now)) {
+            log.info("Refresh rejected for session {}: the chain expired at {}",
+                    presented.getId(), presented.getRefreshExpiresAt());
+            throw invalidRefreshToken();
+        }
+
+        // Re-read, not taken on trust from the session row. An account deactivated an hour ago still
+        // has live sessions - the per-request path rejects them by joining users.active, and this path
+        // has to make the same check rather than inherit it.
+        User user = userRepository.findById(presented.getUserId())
+                .orElseThrow(() -> {
+                    log.warn("Refresh rejected: session {} names user {}, which no longer exists",
+                            presented.getId(), presented.getUserId());
+                    return invalidRefreshToken();
+                });
+        if (!Boolean.TRUE.equals(user.getActive())) {
+            log.info("Refresh rejected for user {}: the account is deactivated", user.getId());
+            throw invalidRefreshToken();
+        }
+
+        return rotateSessionAndTokens(presented, user);
+    }
+
+    /**
+     * Runs a limiter operation without letting a fault in it break authentication.    /**
      * Runs a limiter operation without letting a fault in it break authentication.
      *
      * <p><strong>Fail-safe policy.</strong> Throttling is protective, not authoritative: it decides
@@ -157,7 +263,7 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
-    private LoginResponse authenticate(LoginRequest request, String clientIp) {
+    private AuthenticationResponse authenticate(LoginRequest request, String clientIp) {
         Optional<User> candidate = userRepository.findByEmail(request.getEmail());
 
         String storedHash = candidate
@@ -202,13 +308,71 @@ public class AuthServiceImpl implements AuthService {
      * assembled in memory, so what the client is told matches what the request path will decide. They
      * are for rendering only; nothing on the server reads them again.
      */
-    private LoginResponse issueSessionAndToken(User user, String clientIp) {
+    private AuthenticationResponse issueSessionAndToken(User user, String clientIp) {
+        Instant issuedAt = Instant.now();
+        Instant expiresAt = issuedAt.plus(properties.jwt().ttl());
+        Instant refreshExpiresAt = issuedAt.plus(properties.refresh().ttl());
+
+        RefreshTokenService.IssuedRefreshToken refresh = refreshTokenService.issue();
+
+        UserSession session = sessionService.open(
+                user.getId(), issuedAt, expiresAt,
+                refresh.hash(), refreshExpiresAt,
+                clientIp, userAgent());
+
+        log.info("Opened session {} for user {}", session.getId(), user.getId());
+
+        return respond(user, session, refresh.token(), issuedAt, expiresAt, refreshExpiresAt);
+    }
+
+    /**
+     * Issues the successor token pair for a refresh.
+     *
+     * <p>The same shape as {@link #issueSessionAndToken} with one difference that is the entire point:
+     * {@code refreshExpiresAt} is <strong>not</strong> recomputed. It comes back off the row
+     * {@code SessionService.rotate} wrote, which copied it unchanged from the session being replaced -
+     * so the chain still dies {@code app.security.refresh.ttl} after the original login however many
+     * times it rotates, and the {@code refreshExpiresIn} the client is told shrinks towards zero across
+     * the day. That is what lets a UI warn somebody that their shift{@code 's} session is about to end
+     * instead of discovering it on a failed save.
+     *
+     * <p>An empty result from {@code rotate} means a concurrent request claimed the same token first.
+     * That is a 401 and nothing else - not reuse, and nothing is revoked; see {@link #refresh}.
+     */
+    private AuthenticationResponse rotateSessionAndTokens(UserSession previous, User user) {
         Instant issuedAt = Instant.now();
         Instant expiresAt = issuedAt.plus(properties.jwt().ttl());
 
-        UserSession session = sessionService.open(
-                user.getId(), issuedAt, expiresAt, clientIp, userAgent());
+        RefreshTokenService.IssuedRefreshToken refresh = refreshTokenService.issue();
 
+        UserSession session = sessionService.rotate(
+                        previous, issuedAt, expiresAt, refresh.hash(),
+                        clientIpResolver.resolve(httpServletRequest), userAgent())
+                .orElseThrow(AuthServiceImpl::invalidRefreshToken);
+
+        log.info("Rotated session {} into {} for user {} in family {}",
+                previous.getId(), session.getId(), user.getId(), session.getFamilyId());
+
+        return respond(user, session, refresh.token(),
+                issuedAt, expiresAt, session.getRefreshExpiresAt());
+    }
+
+    /**
+     * Builds the response both entry points return.
+     *
+     * <p>The roles and permissions are read back from the database rather than assembled in memory, so
+     * what the client is told matches what the request path will decide. They are for rendering only;
+     * nothing on the server reads them again.
+     *
+     * <p>Both lifetimes are derived from the instants rather than from configuration.
+     * {@code expiresIn} would be the same either way, but {@code refreshExpiresIn} would not: the
+     * configured TTL is the length of a <em>chain</em>, and what a client needs is how much of this
+     * particular chain is left. Reporting the TTL on every refresh would tell a user at hour seven that
+     * they had eight hours remaining, and the warning they needed would never fire.
+     */
+    private AuthenticationResponse respond(User user, UserSession session, String refreshToken,
+                                           Instant issuedAt, Instant expiresAt,
+                                           Instant refreshExpiresAt) {
         JwtTokenService.IssuedToken token =
                 jwtTokenService.issue(user, session.getId(), issuedAt, expiresAt);
 
@@ -218,10 +382,12 @@ public class AuthServiceImpl implements AuthService {
         log.info("Issued access token for user {} on session {} with roles {}",
                 user.getId(), session.getId(), roles);
 
-        return LoginResponse.builder()
+        return AuthenticationResponse.builder()
                 .accessToken(token.token())
                 .tokenType("Bearer")
-                .expiresIn(token.expiresIn())
+                .expiresIn(Duration.between(issuedAt, expiresAt).toSeconds())
+                .refreshToken(refreshToken)
+                .refreshExpiresIn(Duration.between(issuedAt, refreshExpiresAt).toSeconds())
                 .userId(user.getId())
                 .fullName(user.getFullName())
                 .roles(roles)
@@ -236,5 +402,22 @@ public class AuthServiceImpl implements AuthService {
 
     private static InvalidCredentialsException invalidCredentials() {
         return new InvalidCredentialsException("Invalid email or password");
+    }
+
+    /**
+     * The one failure the refresh endpoint has.
+     *
+     * <p>Unknown token, already rotated, revoked session, expired chain, deactivated account and a lost
+     * concurrency race all produce this, with identical wording - the same uniform-failure rule
+     * {@link #authenticate} follows, and for the same reason. A caller who learns <em>which</em> of
+     * those applied learns whether a token they are holding was ever real, and whether the account
+     * behind it exists. The specific cause is logged at the point it is detected and never returned.
+     *
+     * <p>It is its own type rather than {@code InvalidCredentialsException}, which would have rendered
+     * as "Invalid email or password." - a sentence with no password in it, shown to somebody whose
+     * session simply reached its cap. See {@code InvalidRefreshTokenException}.
+     */
+    private static InvalidRefreshTokenException invalidRefreshToken() {
+        return new InvalidRefreshTokenException("Invalid or expired refresh token");
     }
 }

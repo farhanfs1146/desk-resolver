@@ -4,7 +4,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Builder;
 import lombok.Data;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 /** One message in a ticket's thread. */
 @Data
@@ -26,5 +26,5 @@ public class TicketCommentResponse {
     @Schema(description = "Full name of the user who wrote it", example = "Farhan Ali")
     private String commentedBy;
 
-    private LocalDateTime createdAt;
+    private Instant createdAt;
 }

@@ -20,7 +20,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
 /**
@@ -105,11 +105,11 @@ public class TicketCommentServiceImpl implements TicketCommentService {
     /**
      * Truncated to microseconds, matching {@code TicketServiceImpl}.
      *
-     * <p>PostgreSQL's {@code timestamp} stores microseconds, so an untruncated
-     * {@code LocalDateTime.now()} is rounded on write and comes back different from what was returned
-     * in the response that created it.
+     * <p>PostgreSQL's {@code timestamptz} stores microseconds, so an untruncated {@code Instant.now()}
+     * is rounded on write and comes back different from what was returned in the response that created
+     * it.
      */
-    private static LocalDateTime now() {
-        return LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
+    private static Instant now() {
+        return Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 }

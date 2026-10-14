@@ -54,7 +54,24 @@ app:
       # failing. Every token dies on restart. Never enable this anywhere shared.
       allow-generated-secret: ${APP_JWT_ALLOW_GENERATED_SECRET:false}
       issuer: desk-resolver
+      # Access-token lifetime. Keep it SHORT - this is how long a leaked token is usable for, and
+      # since refresh tokens exist there is no longer any reason to lengthen it for convenience.
       ttl: 30m
+
+    # -------------------------------------------------------------------------
+    # Refresh tokens
+    # -------------------------------------------------------------------------
+    # How long somebody may keep working without typing their password again - a different question
+    # from jwt.ttl above, which is how long one access token lives.
+    #
+    # 8h is one working shift: sign in on arrival, sign in again tomorrow. ABSOLUTE, not sliding -
+    # SessionService.rotate copies the expiry forward unchanged, so a chain dies this long after the
+    # login that started it however many times it refreshes.
+    #
+    # 7d (the usual default elsewhere) was rejected: it leaves a live credential in browser storage
+    # overnight and over a weekend to save one login a week.
+    refresh:
+      ttl: ${APP_REFRESH_TTL:8h}
 
     # Exact browser origins allowed to call the API.
     cors:

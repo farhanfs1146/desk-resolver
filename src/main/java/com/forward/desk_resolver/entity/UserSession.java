@@ -37,6 +37,12 @@ import java.util.UUID;
  * countable. Generating it in Java also keeps session creation to a single insert with no round trip
  * for the key.
  *
+ * <p><strong>Since V21 a session also carries the refresh token that replaces it.</strong> That makes
+ * a row two things at once - the record of one access token, and the credential for minting the next -
+ * and they are on one row precisely so they cannot disagree: revoking a session revokes its refresh
+ * token in the same statement, with nothing to remember separately. Rotation inserts rather than
+ * updates, so the rows of one {@link #familyId} are the history of a single login.
+ *
  * <p>This is <em>not</em> an HTTP session: nothing is stored in it, no cookie exists, and the security
  * filter chain is still {@code STATELESS}. It is a revocation list, expressed positively.
  */
@@ -52,6 +58,66 @@ public class UserSession implements Persistable<UUID> {
 
     @Column(name = "user_id", nullable = false)
     private Long userId;
+
+    /**
+     * The login this session descends from, and the unit revocation acts on.
+     *
+     * <p>A refresh does not update a session in place - it opens a new one carrying the same
+     * {@code familyId} (see {@code SessionService.rotate}). So a family is one login plus every token
+     * rotated out of it, and that is the granularity a person means by "log out": ending one
+     * 30-minute slice of a login they are still inside would be a strange thing to offer.
+     *
+     * <p>For a session opened by {@code POST /api/auth/login} this is the session's own id. There is
+     * no separate generation step and no row without a family, so a family-wide revoke can never miss
+     * one through a null.
+     */
+    @Column(name = "family_id", nullable = false)
+    private UUID familyId;
+
+    /**
+     * SHA-256 (hex) of the opaque refresh token issued with this session's access token.
+     *
+     * <p><strong>The token itself is never stored.</strong> It is returned once, in the response that
+     * minted it, and the only thing this application keeps is a digest that cannot be presented. A
+     * database dump therefore contains no usable credential.
+     *
+     * <p><strong>SHA-256 rather than BCrypt</strong>, which inverts the rule the password column
+     * follows, and deliberately. BCrypt is slow because a password is low-entropy and guessable; a
+     * refresh token is 256 bits of {@code SecureRandom} output, so there is nothing to guess and the
+     * cost would be paid on every refresh for no gain. More decisively, BCrypt salts per row, so the
+     * session could only be found by verifying the candidate against every row in the table. A
+     * deterministic digest is found with one indexed probe.
+     *
+     * <p>Null only on sessions issued before V21, which consequently cannot be refreshed.
+     */
+    @Column(name = "refresh_token_hash", length = 64)
+    private String refreshTokenHash;
+
+    /**
+     * When the refresh chain ends, regardless of rotations.
+     *
+     * <p>Copied <em>unchanged</em> from the previous session on every rotation, so this is an absolute
+     * cap measured from the original login rather than a sliding window. Re-deriving it on each
+     * refresh would mean a session used daily never expires at all, which is precisely what turns a
+     * stolen refresh token into permanent access.
+     */
+    @Column(name = "refresh_expires_at")
+    private Instant refreshExpiresAt;
+
+    /**
+     * When this session's refresh token was exchanged for the next one. Null while it is still usable.
+     *
+     * <p><strong>This field is what reuse detection reads</strong>, and the reason rotation marks a row
+     * rather than clearing it. A refresh token is usable exactly once, so a second presentation means
+     * two parties hold it and one of them stole it. Nothing can tell which, so the whole family is
+     * revoked - see {@code SessionService.RevocationReason#REFRESH_TOKEN_REUSED}.
+     *
+     * <p>Note that it is set <em>without</em> revoking the row. The old access token stays valid until
+     * its own {@code exp}, so a client with requests already in flight at the moment it rotates does
+     * not collect 401s for them; the credential that could mint more tokens is what dies immediately.
+     */
+    @Column(name = "refresh_used_at")
+    private Instant refreshUsedAt;
 
     @Column(name = "issued_at", nullable = false)
     private Instant issuedAt;

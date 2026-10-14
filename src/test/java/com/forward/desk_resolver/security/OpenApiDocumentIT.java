@@ -58,6 +58,26 @@ class OpenApiDocumentIT extends AbstractPostgresIT {
     }
 
     /**
+     * Refresh opts out too, and has to.
+     *
+     * <p>By the time a client calls it, the access token it holds has expired - that is the only
+     * reason to call it. Documenting it as requiring a bearer token would make Swagger UI attach the
+     * dead one and would tell a reader the endpoint is unusable in exactly the situation it exists for.
+     *
+     * <p>Public in the document and public in {@code SecurityConfig.ALWAYS_PUBLIC}, which is the pair
+     * that has to agree: this assertion fails if somebody opts the endpoint back in, and
+     * {@code RefreshTokenIT} fails if they remove it from the filter chain.
+     */
+    @Test
+    @DisplayName("refresh opts out as well - the access token is expired by the time it is called")
+    void refreshIsDocumentedAsPublic() throws Exception {
+        mockMvc.perform(get(DOC))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.paths./api/auth/refresh.post.security").isArray())
+                .andExpect(jsonPath("$.paths./api/auth/refresh.post.security").isEmpty());
+    }
+
+    /**
      * Logout does <em>not</em> opt out, unlike login.
      *
      * <p>Easy to get wrong, because the two sit next to each other in {@code AuthController} and read

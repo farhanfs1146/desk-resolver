@@ -8,7 +8,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Data
 public class CreateTicketRequest {
@@ -34,8 +34,23 @@ public class CreateTicketRequest {
     @Schema(description = "select the impact of this ticket whether it is department-level, user-level")
     private String businessImpact;
 
-    @Schema(description = "select the date of when this ticket should resolve.")
-    private LocalDateTime expectedBy;
+    /**
+     * When the requester needs this resolved by, as an absolute instant.
+     *
+     * <p><strong>This is a breaking input change, made on purpose.</strong> The field was
+     * {@code LocalDateTime}, so {@code "2026-10-20T17:00:00"} was accepted and silently interpreted in
+     * whatever zone the server's JVM happened to run in - a deadline whose meaning depended on where
+     * the application was deployed rather than on what the requester asked for. It is now an
+     * {@code Instant}, so a value must carry an offset ({@code "2026-10-20T17:00:00+05:00"}) or be
+     * UTC ({@code "...Z"}), and an offset-less datetime is a 400 naming the field rather than a guess.
+     *
+     * <p>Refusing it is the point. There is no zone this API could substitute that would be right more
+     * often than it was wrong, and the client always knows the one the person typing meant.
+     */
+    @Schema(description = "When this ticket should be resolved by, as an ISO-8601 instant. Must carry "
+            + "an offset or Z - an offset-less datetime is refused rather than assigned a zone.",
+            example = "2026-10-20T17:00:00+05:00")
+    private Instant expectedBy;
 
     @NotNull(message = "Application id is required")
     @Schema(description = "Applicant have to mention clearly for which application they're creating/rasing ticket")
