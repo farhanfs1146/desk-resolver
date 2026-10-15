@@ -139,6 +139,35 @@ public interface UserRoleRepository extends JpaRepository<UserRole, UserRole.Key
     long countOtherActiveHoldersOfPermission(@Param("permissionCode") String permissionCode,
                                              @Param("excludedUserId") Long excludedUserId);
 
+    /**
+     * Everybody who can exercise one permission right now.
+     *
+     * <p>The set, where {@link #countOtherActiveHoldersOfPermission} is the size and
+     * {@link #userHoldsPermission} is a membership test. It exists for notification fan-out, which
+     * has one event with no individual to address: a ticket is raised and nobody owns it, so the
+     * people to tell are whoever holds {@code TICKET_ASSIGN}. Every other notification's recipients
+     * come from the ticket itself.
+     *
+     * <p>Same three conditions as its two siblings - the grant has to come through an active role and
+     * the holder has to be an active account - because a notification sent to somebody who cannot act
+     * on it is worse than none: it sits unread in an inbox nobody opens while the queue looks
+     * attended to.
+     *
+     * <p>Ordered, so a fan-out writes its rows in the same order every time and a test can assert on
+     * them without sorting first.
+     */
+    @Query(value = """
+            select distinct ur.user_id
+            from auth.user_roles ur
+                     join auth.users u on u.id = ur.user_id and u.active = true
+                     join auth.roles r on r.id = ur.role_id and r.active = true
+                     join auth.role_permissions rp on rp.role_id = r.id
+                     join auth.permissions p on p.id = rp.permission_id
+            where p.code = :permissionCode
+            order by ur.user_id
+            """, nativeQuery = true)
+    List<Long> findActiveHolderIdsOfPermission(@Param("permissionCode") String permissionCode);
+
     /** Used by the bootstrap administrator check; counts rather than loads, so it stays cheap. */
     @Query("select count(ur) from UserRole ur where ur.role.code = :roleCode")
     long countByRoleCode(@Param("roleCode") String roleCode);
