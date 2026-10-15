@@ -48,6 +48,7 @@ public class TicketServiceImpl implements TicketService {
     private final TicketNumberGenerator ticketNumberGenerator;
     private final CurrentUserProvider currentUserProvider;
     private final TicketVisibilityGuard ticketVisibilityGuard;
+    private final NotificationFanOut notificationFanOut;
 
     // Overall Flow:
     // OPEN → ASSIGNED → IN_PROGRESS → RESOLVED → CLOSED
@@ -114,6 +115,10 @@ public class TicketServiceImpl implements TicketService {
                 "Ticket created successfully"
         );
 
+        // Inside this transaction on purpose - see NotificationFanOut. A new ticket belongs to nobody
+        // yet, so the people told are whoever can assign it; the raiser is not told what they just did.
+        notificationFanOut.onTicketCreated(saved, raisedBy);
+
         return mapToResponse(saved);
     }
 
@@ -145,9 +150,10 @@ public class TicketServiceImpl implements TicketService {
 
         requireAssignable(newAssignedUser);
 
-        String oldAssignedUser = ticket.getAssignedTo() != null
-                ? ticket.getAssignedTo().getFullName()
-                : null;
+        // The entity, not just the name: whoever is losing the ticket has to be notified, and a
+        // display name cannot address anybody - auth.users.full_name is not unique.
+        User previousAssignee = ticket.getAssignedTo();
+        String oldAssignedUser = previousAssignee != null ? previousAssignee.getFullName() : null;
 
         String oldStatus = ticket.getStatus().name();
 
@@ -175,6 +181,11 @@ public class TicketServiceImpl implements TicketService {
                 actor,
                 "Status changed automatically on assignment"
         );
+
+        // One notification, not two. The status change here is a consequence of the assignment rather
+        // than a separate event, and announcing both would tell the new assignee twice about one
+        // action - once that it is theirs, once that it is now ASSIGNED, which is the same news.
+        notificationFanOut.onTicketAssigned(ticket, actor, previousAssignee);
 
         return mapToResponse(ticket);
     }
@@ -234,6 +245,8 @@ public class TicketServiceImpl implements TicketService {
                 actor,
                 remarks == null || remarks.isBlank() ? "Ticket status updated" : remarks.trim()
         );
+
+        notificationFanOut.onStatusChanged(ticket, actor, oldStatus, status.name());
 
         return mapToResponse(ticket);
     }

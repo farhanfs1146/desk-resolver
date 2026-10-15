@@ -217,10 +217,21 @@ produced inside the security filter chain.
 | `GET` | `/api/users` | `USER_READ` |
 | `GET` | `/api/users/{id}` | authenticated (own record, or `USER_READ`) |
 | `PATCH` | `/api/users/me/password` | authenticated |
+| `GET` | `/api/notifications` | authenticated (own inbox) |
+| `GET` | `/api/notifications/unread-count` | authenticated (own inbox) |
+| `PATCH` | `/api/notifications/{id}/read` | authenticated (own inbox) |
+| `POST` | `/api/notifications/read-all` | authenticated (own inbox) |
 | `POST` `PUT` `DELETE` | `/api/applications`, `/api/applications/{id}` | `APPLICATION_MANAGE` |
 | `GET` | `/api/applications`, `/api/applications/active`, `/api/applications/{id}` | `APPLICATION_READ` |
 
 `DELETE /api/applications/{id}` is a soft deactivation; nothing is ever deleted.
+
+The four notification endpoints assert **no permission**, and that is deliberate rather than an
+oversight. The resource is defined as the caller's own: the recipient comes from the verified
+token and appears in the `where` clause of every query, so the only caller who can reach a
+notification is the one it was addressed to. A `NOTIFICATION_READ` permission would have to mean
+something an administrator could grant, and the only thing it could mean is reading other
+people's inboxes. See [Notifications](#notifications).
 
 `POST /api/users` takes `"roles": ["IT_SUPPORT", "DEVELOPER"]` — required and non-empty, because an
 account created by omission is an account nobody decided on. `PUT /api/users/{id}/roles` replaces the
@@ -303,6 +314,93 @@ CORS).
 so there is no column to order by, and "sort by role" would have to be given a meaning first. It is a
 400, like any other unknown sort property.
 
+## Notifications
+
+Added in `V22`. One row per person per thing that happened to them, written by the request that
+caused it.
+
+**Recipients come from the ticket, not from a role.** `raised_by` and `assigned_to`, and that is
+all - with one exception: a ticket nobody owns yet has no assignee to tell, so
+`TICKET_AWAITING_ASSIGNMENT` goes to the holders of `TICKET_ASSIGN`. Fanning out by role instead
+would put every event in the system in front of every `DIRECTOR`, who would stop reading them by the
+third day.
+
+**The actor is never a recipient.** Removed once, in `NotificationFanOut.save`, rather than at each
+call site - "do not tell somebody what they just did" is the single largest source of notification
+noise, and it should be one line of code rather than a convention five methods have to remember. A
+recipient also appears at most once per event, because one person can be both the raiser and the
+assignee.
+
+| Type | Who gets it |
+| --- | --- |
+| `TICKET_AWAITING_ASSIGNMENT` | holders of `TICKET_ASSIGN`, when a new ticket has no assignee |
+| `TICKET_ASSIGNED_TO_YOU` | the new assignee |
+| `TICKET_NOW_ASSIGNED` | the requester - somebody owns it now |
+| `TICKET_TAKEN_FROM_YOU` | the previous assignee, on reassignment |
+| `TICKET_STATUS_CHANGED` | requester and assignee |
+| `TICKET_COMMENTED` | the other party on the thread |
+| `TICKET_OVERDUE` | the assignee (or the triage queue if unowned) and the requester |
+
+**The type is written from the recipient's point of view**, which is why one assignment produces
+three of them. The alternative was a single `TICKET_ASSIGNED` plus a comparison at render time, and
+the only thing a client could compare is a full name - `auth.users.full_name` has no unique
+constraint, so two colleagues sharing a name would each read the other's assignment as their own.
+
+**No rendered sentence is stored.** The type, the ticket and the two values are; the wording is the
+client's. A sentence written into a row cannot be reworded, corrected or translated afterwards, and
+every row already written would keep the old text for ever.
+
+**The ticket's number and title are copied in, not joined.** A notification states what was true when
+it happened, and the person it was addressed to was entitled to that text at that moment. Neither
+column can be changed through this API, so the snapshot cannot drift - and it is what keeps a
+notification readable by somebody since reassigned away, which is the right outcome: they are being
+shown what they were already told. The link still 404s for them, because `TicketVisibilityGuard` has
+not changed.
+
+**Recording happens inside the transaction that caused the change.** A notification for a status
+change that rolled back would announce something that never happened, and the only way to be certain
+it cannot is for the rows to live or die with the change. That is also why `NotificationFanOut` does
+nothing but build and save: the transaction is somebody's request, so anything slow in there is
+latency on their click.
+
+**A comment notifies without becoming an audit event.** The decision that a comment writes no
+`ticket_history_tracking` row and does not bump `updated_at` is untouched - see
+`TicketCommentServiceImpl`. A notification is a message to a person; an audit row is a record of a
+state change. A comment is the first and not the second.
+
+### The overdue scan
+
+Every other notification is caused by somebody doing something. Nobody causes a deadline to pass, so
+`OverdueTicketScanner` looks - hourly by default
+(`APP_OVERDUE_SCAN_INTERVAL`, ISO-8601). Scanning rather than a timer per deadline: a query against
+an indexed column has no state to get wrong, where durable per-ticket timers would need cancelling
+when a deadline moves or a ticket is resolved. The cost is that a ticket is announced up to one
+interval after it goes late, which for a business deadline measured in days is not a delay anybody
+notices.
+
+**Idempotency is the whole design**, because the scan meets the same overdue ticket on every run for
+as long as it stays overdue. The event key carries the deadline, so one ticket passing one deadline
+is one event however many scans see it - and a *moved* deadline that is missed again is correctly a
+new one. Keys already present are filtered out before inserting rather than letting the unique
+constraint reject them: a constraint violation would roll the whole scan back and take the tickets it
+had not reached yet with it.
+
+Settled work is never late. The test is on status, not on `resolved_at`, because a ticket can be
+closed without ever passing through `RESOLVED`.
+
+### What is not built
+
+- **No delivery.** These are recorded, not sent. Nothing pushes and nothing emails. Delivery does not
+  belong in `NotificationFanOut` - an SMTP call inside the transaction that assigns a ticket would
+  make a mail outage look like an assignment failure. It is an
+  `@TransactionalEventListener(AFTER_COMMIT)` reading these rows, and it is deliberately absent rather
+  than stubbed.
+- **No per-user preferences.** Everybody gets everything their involvement earns them. Preferences
+  are worth having once there is a channel noisy enough to want turning off, which in-app is not.
+- **No digest.** `MANAGER`, `HOD` and `DIRECTOR` receive nothing unless they raised or were assigned
+  the ticket, deliberately: what they want is an SLA summary, which is a different mechanism from a
+  feed and needs reporting endpoints that do not exist.
+
 ## Swagger
 
 `http://localhost:9211/swagger-ui.html` — **gated by default.** Set `APP_SWAGGER_PUBLIC=true` for local
@@ -381,6 +479,14 @@ reuse detection and the one thing a client must not get wrong.
 ## Known gaps
 
 - **Login throttling is per-instance** (in-memory), so it weakens if the app is scaled out.
+- **The overdue scan is not safe on two instances.** Both would read the same candidates, see the
+  same empty set of existing keys, and the second to commit would fail on
+  `uq_notifications_recipient_event` - so one scan succeeds and the other rolls back having done
+  nothing. Nothing is duplicated and nothing is lost, but a scan is wasted, and under contention
+  it is possible for neither to progress. It needs a lock before a second instance runs:
+  `SELECT ... FOR UPDATE SKIP LOCKED` over the candidates, or ShedLock around the method. Stated
+  rather than fixed because there is no multi-instance deployment here to test it in, and an
+  untested lock is a worse answer than a documented limit.
 - **Attachment storage is per-instance.** `LocalAttachmentStorage` writes to a local directory, so a
   file uploaded through one instance is not readable from another unless `APP_ATTACHMENT_DIR` points at
   shared storage. Object storage is a new implementation of the two-method `AttachmentStorage`

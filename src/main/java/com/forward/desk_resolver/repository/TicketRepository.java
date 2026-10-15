@@ -2,12 +2,17 @@ package com.forward.desk_resolver.repository;
 
 
 import com.forward.desk_resolver.entity.Ticket;
+import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.repository.projection.TicketRow;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 @Repository
@@ -46,4 +51,42 @@ public interface TicketRepository extends JpaRepository<Ticket, Long>, TicketQue
             where t.id = :id
             """)
     Optional<TicketRow> findTicketRowById(@Param("id") Long id);
+
+    /**
+     * Tickets whose deadline has passed and which nobody has finished.
+     *
+     * <p>Read by {@code OverdueTicketScanner}, and it returns <strong>entities</strong> rather than
+     * the projection every other read here uses. That is a deliberate exception, and it costs
+     * nothing: the scanner hands each ticket to {@code NotificationFanOut}, which wants the raiser's
+     * and assignee's ids and the ticket's number and title. The two names are on this row, and the
+     * two ids are the foreign keys of LAZY to-one associations - so reading them initialises no
+     * proxy and issues no further statement. A projection would carry the same five fields and then
+     * have to be mapped back into something the fan-out could take.
+     *
+     * <p>Three conditions, and each excludes something that would otherwise be announced wrongly:
+     *
+     * <ul>
+     *   <li>{@code expectedBy is not null} - a ticket with no deadline cannot miss one. Most have
+     *       none; the field is optional on the create form.
+     *   <li>{@code expectedBy < :now} - the deadline is in the past.
+     *   <li>{@code status not in (:settled)} - resolved and closed work is finished. Telling somebody
+     *       their completed ticket is late would be wrong rather than merely noisy, and
+     *       {@code resolved_at} is not the test: a ticket can be closed without passing through
+     *       RESOLVED.
+     * </ul>
+     *
+     * <p>Oldest deadline first, so that a {@code Pageable}-capped scan works through the worst
+     * backlog before the rest of it - see the scanner for why it is capped at all.
+     */
+    @Query("""
+            select t
+            from Ticket t
+            where t.expectedBy is not null
+              and t.expectedBy < :now
+              and t.status not in :settled
+            order by t.expectedBy asc, t.id asc
+            """)
+    List<Ticket> findOverdue(@Param("now") Instant now,
+                             @Param("settled") Collection<TicketStatus> settled,
+                             Pageable pageable);
 }

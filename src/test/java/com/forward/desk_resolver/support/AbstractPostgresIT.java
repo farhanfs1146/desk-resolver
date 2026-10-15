@@ -10,6 +10,7 @@ import com.forward.desk_resolver.enums.IssueType;
 import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.repository.ApplicationRepository;
+import com.forward.desk_resolver.repository.NotificationRepository;
 import com.forward.desk_resolver.repository.RoleRepository;
 import com.forward.desk_resolver.repository.TicketAttachmentRepository;
 import com.forward.desk_resolver.repository.TicketCommentRepository;
@@ -112,6 +113,7 @@ public abstract class AbstractPostgresIT {
     @Autowired protected TicketHistoryTrackingRepository ticketHistoryTrackingRepository;
     @Autowired protected TicketCommentRepository ticketCommentRepository;
     @Autowired protected TicketAttachmentRepository ticketAttachmentRepository;
+    @Autowired protected NotificationRepository notificationRepository;
     @Autowired protected PasswordEncoder passwordEncoder;
     @Autowired protected InMemoryLoginAttemptLimiter loginAttemptLimiter;
     @Autowired protected AttachmentStorageProperties attachmentStorageProperties;
@@ -141,6 +143,11 @@ public abstract class AbstractPostgresIT {
      */
     @BeforeEach
     void resetState() {
+        // Before tickets and users, like every other child. Notifications reference both - CASCADE
+        // rather than RESTRICT, so a leftover row would be deleted silently along with its ticket
+        // rather than blocking the delete, which is exactly why it is cleared explicitly: a test
+        // asserting on a count must not be able to see the previous test's fan-out.
+        notificationRepository.deleteAll();
         ticketCommentRepository.deleteAll();
         ticketAttachmentRepository.deleteAll();
         ticketHistoryTrackingRepository.deleteAll();

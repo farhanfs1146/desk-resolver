@@ -1,6 +1,7 @@
 package com.forward.desk_resolver.service.impl;
 
 import com.forward.desk_resolver.common.exception.InvalidReferenceException;
+import com.forward.desk_resolver.common.exception.ResourceNotFoundException;
 import com.forward.desk_resolver.common.identity.CurrentUserProvider;
 import com.forward.desk_resolver.dto.request.CreateTicketCommentRequest;
 import com.forward.desk_resolver.dto.response.TicketCommentResponse;
@@ -50,6 +51,7 @@ public class TicketCommentServiceImpl implements TicketCommentService {
     private final UserRepository userRepository;
     private final CurrentUserProvider currentUserProvider;
     private final TicketVisibilityGuard ticketVisibilityGuard;
+    private final NotificationFanOut notificationFanOut;
 
     @Override
     @Transactional
@@ -60,10 +62,17 @@ public class TicketCommentServiceImpl implements TicketCommentService {
         User author = userRepository.findById(authorId)
                 .orElseThrow(() -> InvalidReferenceException.of("authenticated user id", authorId));
 
-        // getReferenceById rather than findById: the guard has already proved the row exists, and the
-        // only thing the insert needs from it is the foreign key. Loading the ticket itself would be a
-        // second select for a value already in hand.
-        Ticket ticket = ticketRepository.getReferenceById(ticketId);
+        // findById rather than getReferenceById, which is what this was until notifications arrived.
+        //
+        // The insert itself still needs nothing but the foreign key, which a proxy carries. The
+        // fan-out needs the row: the raiser's and assignee's ids to address, and the number and title
+        // to copy into each notification. So the choice is one select here or a proxy plus a select
+        // in the fan-out - the same statement either way, and one less thing to reason about.
+        //
+        // It stays one select, not two: raisedBy and assignedTo are LAZY to-one associations whose
+        // foreign keys are on this row, so reading their ids initialises nothing.
+        Ticket ticket = ticketRepository.findById(ticketId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Ticket", ticketId));
 
         TicketComment comment = new TicketComment();
         comment.setTicket(ticket);
@@ -73,6 +82,12 @@ public class TicketCommentServiceImpl implements TicketCommentService {
 
         TicketComment saved = ticketCommentRepository.save(comment);
         log.info("User {} commented on ticket {} (comment {})", authorId, ticketId, saved.getId());
+
+        // A notification, and still no audit row. The decision in this class's header is untouched:
+        // a comment is a message rather than a workflow event, so it writes nothing to
+        // ticket_history_tracking and does not bump updated_at. Telling the other party there is
+        // something to read is not a state change - it is the message arriving.
+        notificationFanOut.onCommentAdded(ticket, author);
 
         // Mapped from the entity rather than re-read through the projection: the author's name is
         // already loaded, and a read-back would only prove the insert flushed.

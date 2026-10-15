@@ -127,6 +127,23 @@ app:
       trust-forwarded-headers: ${APP_TRUST_FORWARDED_HEADERS:false}
 
 # ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+app.notifications:
+  # How often to look for tickets whose deadline has passed. ISO-8601, read directly by @Scheduled.
+  #
+  # Every other notification is written by the request that caused it. Nobody causes a deadline to
+  # pass, so this is the only one that has to be noticed - and the interval is how late an
+  # announcement can be, not how often anybody is told: the event key carries the deadline, so one
+  # ticket passing one deadline is announced exactly once however many scans see it.
+  #
+  # An hour, because these are business deadlines measured in days. Shortening it buys promptness
+  # nobody asked for and costs a query per interval.
+  #
+  # NOT SAFE ON MORE THAN ONE INSTANCE as it stands - OverdueTicketScanner says what it would need.
+  overdue-scan-interval: ${APP_OVERDUE_SCAN_INTERVAL:PT1H}
+
+# ---------------------------------------------------------------------------
 # Attachment storage
 # ---------------------------------------------------------------------------
 app.storage:
