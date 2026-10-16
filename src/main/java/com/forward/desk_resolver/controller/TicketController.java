@@ -8,6 +8,7 @@ import com.forward.desk_resolver.dto.request.TicketFilter;
 import com.forward.desk_resolver.dto.request.UpdateTicketStatusRequest;
 import com.forward.desk_resolver.dto.response.TicketHistoryResponse;
 import com.forward.desk_resolver.dto.response.TicketResponse;
+import com.forward.desk_resolver.dto.response.TicketStatsResponse;
 import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.service.TicketService;
@@ -51,6 +52,32 @@ public class TicketController {
     }
 
     /**
+     * Aggregate ticket counts for a dashboard.
+     *
+     * <p><strong>Mapped above {@code /{id}} in this file, but the order does not matter here</strong>
+     * - Spring matches the more specific pattern first, so a literal {@code /stats} wins over the
+     * {@code /{id}} template regardless of declaration order. It is written next to the list endpoint
+     * because that is what it summarises, not to influence matching. (A client asking for
+     * {@code /api/tickets/stats} before this existed got the 400 that parsing "stats" as a Long
+     * produces, not a 404 - so nothing was relying on the old behaviour.)
+     *
+     * <p>Guarded by {@code TICKET_READ_OWN}, the same floor as the list, and the service applies the
+     * same ownership restriction for a caller without {@code TICKET_READ_ALL}. A requester therefore
+     * sees counts of their own tickets and cannot read the size of the table. The response says which
+     * of the two it is in {@code scopedToMe}.
+     *
+     * <p>No new permission was introduced for this. One would have had to be added to
+     * {@code Permission} and to {@code auth.permissions} in a migration, and granted to every role
+     * that already holds a ticket-read permission - a lot of moving parts to express "may read counts
+     * of the tickets you may already read", which is not a separate capability.
+     */
+    @PreAuthorize("hasAuthority('TICKET_READ_OWN')")
+    @GetMapping("/stats")
+    public TicketStatsResponse getStats() {
+        return ticketService.getTicketStats();
+    }
+
+    /**
      * Paged, filtered, sorted ticket list.
      *
      * <p><strong>Response body shape is unchanged:</strong> still a JSON array of
@@ -62,6 +89,14 @@ public class TicketController {
      * clients. The behavioural change is unavoidable - an unbounded list was the defect - but a client
      * that ignores the new parameters now receives the newest
      * {@value PageRequests#DEFAULT_PAGE_SIZE} tickets instead of every row.
+     *
+     * <p><strong>Search is the {@code q} parameter here, not a {@code /search} endpoint.</strong> A
+     * separate endpoint would have had to grow its own copy of the paging, the sorting, the status and
+     * priority filters and - the part that matters - the ownership restriction, because a search that
+     * cannot be narrowed or paged is not useful and a search that forgets the restriction is a way to
+     * read other people's tickets. Searching is a filter over the same collection, so it is a
+     * parameter on the same endpoint, and every one of those properties is inherited rather than
+     * reimplemented.
      */
     @PreAuthorize("hasAuthority('TICKET_READ_OWN')")
     @GetMapping
@@ -74,6 +109,11 @@ public class TicketController {
             @RequestParam(required = false) Long assignedTo,
             @Parameter(description = "Filter by the raising user's id")
             @RequestParam(required = false) Long raisedBy,
+            @Parameter(description = "Free-text search over ticket number, title and description. "
+                    + "Case-insensitive substring match; '%' and '_' are matched literally, not as "
+                    + "wildcards. Blank or whitespace-only means no search. ANDed with the other "
+                    + "filters, so it narrows them rather than replacing them.")
+            @RequestParam(required = false) String q,
             @Parameter(description = "Zero-based page index")
             @RequestParam(required = false) Integer page,
             @Parameter(description = "Page size; capped at 100")
@@ -86,7 +126,7 @@ public class TicketController {
             @RequestParam(required = false) String sort
     ) {
         Pageable pageable = TicketPageRequests.of(page, size, sort);
-        TicketFilter filter = new TicketFilter(status, priority, assignedTo, raisedBy);
+        TicketFilter filter = new TicketFilter(status, priority, assignedTo, raisedBy, q);
 
         Page<TicketResponse> result = ticketService.searchTickets(filter, pageable);
 

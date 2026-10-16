@@ -4,6 +4,7 @@ import com.forward.desk_resolver.dto.request.CreateTicketRequest;
 import com.forward.desk_resolver.dto.request.TicketFilter;
 import com.forward.desk_resolver.dto.response.TicketHistoryResponse;
 import com.forward.desk_resolver.dto.response.TicketResponse;
+import com.forward.desk_resolver.dto.response.TicketStatsResponse;
 import com.forward.desk_resolver.enums.TicketStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -47,4 +48,17 @@ public interface TicketService {
      * ticket gets a 404, not an empty page - an empty page would confirm the ticket exists.
      */
     Page<TicketHistoryResponse> getTicketHistory(Long ticketId, Pageable pageable);
+
+    /**
+     * Aggregate counts over the tickets the caller may see.
+     *
+     * <p>Visibility is the same boundary {@link #searchTickets} applies, and for the same reason: a
+     * count is information about rows. Without the restriction a requester could read the size of the
+     * whole ticket table off a screen that is meant to show them their own requests.
+     *
+     * <p>Three queries, none of which returns a ticket. See
+     * {@code TicketQueryRepository#findTicketStats} for why that is three rather than one or
+     * fourteen.
+     */
+    TicketStatsResponse getTicketStats();
 }

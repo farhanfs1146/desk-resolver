@@ -15,7 +15,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -65,11 +64,11 @@ public class OverdueTicketScanner {
     /**
      * Work that cannot be late any more, whatever its deadline says.
      *
-     * <p>Status rather than {@code resolvedAt}: a ticket can be closed without having passed through
-     * RESOLVED, so a timestamp check would announce closed work as overdue.
+     * <p>Defined on {@link TicketStatus#settled()} rather than here, because the ticket statistics
+     * endpoint asks the same question and two copies of this set would eventually disagree. The
+     * reasoning for the two members it has is recorded there.
      */
-    private static final Set<TicketStatus> SETTLED =
-            EnumSet.of(TicketStatus.RESOLVED, TicketStatus.CLOSED);
+    private static final Set<TicketStatus> SETTLED = TicketStatus.settled();
 
     /**
      * How many tickets one scan will handle.

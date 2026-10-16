@@ -5,7 +5,10 @@ import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.User;
 import com.forward.desk_resolver.enums.Priority;
+import com.forward.desk_resolver.enums.TicketStatus;
+import com.forward.desk_resolver.repository.projection.TicketCountRow;
 import com.forward.desk_resolver.repository.projection.TicketRow;
+import com.forward.desk_resolver.repository.projection.TicketStatsRow;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import jakarta.persistence.criteria.*;
@@ -14,8 +17,10 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.support.PageableExecutionUtils;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Criteria-API implementation of {@link TicketQueryRepository}.
@@ -25,6 +30,16 @@ import java.util.List;
  * interface for the measurements that motivated this.
  */
 public class TicketQueryRepositoryImpl implements TicketQueryRepository {
+
+    /**
+     * The {@code ESCAPE} character for the free-text {@code LIKE} patterns.
+     *
+     * <p>A backslash, which is also PostgreSQL's default - but declared explicitly in every
+     * {@code like()} call below rather than relied upon, because the default is a property of the
+     * database and this class does not get to assume which one it is talking to. The tests run on
+     * PostgreSQL; the escaping should not become wrong if that ever stops being true.
+     */
+    private static final char LIKE_ESCAPE = '\\';
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -51,6 +66,138 @@ public class TicketQueryRepositoryImpl implements TicketQueryRepository {
         // page that came back short cannot have more rows behind it. That removes the second query
         // entirely for small result sets, which is the common case for a filtered queue view.
         return PageableExecutionUtils.getPage(rows, pageable, () -> countRows(effective, restrictToUserId));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Statistics
+    //
+    // Three queries, and the split is by shape rather than by convenience: one conditional
+    // aggregation for the scalars, and one `group by` each for the two breakdowns. Collapsing the
+    // breakdowns into the scalar query is not possible - a row cannot be grouped two ways at once -
+    // and splitting the scalars apart would scan the same rows four times to answer four questions
+    // about them.
+    //
+    // None of the three joins anything. Every predicate compares a column on `tickets` itself,
+    // including the association ids, for the reason recorded at length in fetchRows: Hibernate
+    // renders an association id on the root as the foreign-key column, which is what keeps
+    // idx_tickets_assigned_to_created_at and idx_tickets_raised_by_created_at reachable.
+    // ---------------------------------------------------------------------------------------------
+
+    @Override
+    public TicketStatsRow findTicketStats(Instant now, Long currentUserId, Long restrictToUserId) {
+        CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+        CriteriaQuery<TicketStatsRow> query = cb.createQuery(TicketStatsRow.class);
+        Root<Ticket> ticket = query.from(Ticket.class);
+
+        Predicate unsettled = cb.not(ticket.get("status").in(TicketStatus.settled()));
+
+        // count() over a CASE that yields NULL for non-matching rows, rather than sum() over 1/0.
+        // Both work; count() cannot return NULL for an empty result set, and sum() can - which would
+        // make every field here a nullable Long that the record would then have to defend against.
+        Expression<Long> overdue = countWhere(cb, cb.and(
+                cb.isNotNull(ticket.get("expectedBy")),
+                cb.lessThan(ticket.get("expectedBy"), now),
+                unsettled));
+
+        Expression<Long> unassigned = countWhere(cb, cb.and(
+                cb.isNull(ticket.get("assignedTo")),
+                unsettled));
+
+        Expression<Long> assignedToMe = countWhere(cb, cb.and(
+                cb.equal(ticket.get("assignedTo").get("id"), currentUserId),
+                unsettled));
+
+        // No `unsettled` here, deliberately - see TicketStatsRow: this one answers "where are my
+        // requests up to", so a resolved request is still one of them.
+        Expression<Long> raisedByMe = countWhere(cb,
+                cb.equal(ticket.get("raisedBy").get("id"), currentUserId));
+
+        query.select(cb.construct(TicketStatsRow.class, overdue, unassigned, assignedToMe, raisedByMe));
+        applyVisibility(cb, query, ticket, restrictToUserId);
+
+        return entityManager.createQuery(query).getSingleResult();
+    }
+
+    @Override
+    public List<TicketCountRow<TicketStatus>> countTicketsByStatus(Long restrictToUserId) {
+        return countGroupedBy("status", false, restrictToUserId);
+    }
+
+    @Override
+    public List<TicketCountRow<Priority>> countOpenTicketsByPriority(Long restrictToUserId) {
+        return countGroupedBy("priority", true, restrictToUserId);
+    }
+
+    /**
+     * One {@code select column, count(*) ... group by column} over the caller's visible tickets.
+     *
+     * <p>The grouped column is named by string because the two callers differ in nothing else. It is
+     * never user input - both call sites pass a literal - so there is no injection surface here;
+     * Criteria would reject an unmapped name at query build time in any case.
+     *
+     * @param unsettledOnly excludes settled tickets. False means count every ticket, which is what
+     *                      the status breakdown wants - a breakdown of statuses that omitted two of
+     *                      them would be a strange thing to render.
+     *
+     * <p><strong>The casts.</strong> {@code CriteriaBuilder.construct} is declared over a raw
+     * {@code Class}, so it cannot carry {@code TicketCountRow}'s own type argument through; there is
+     * no way to express "construct a {@code TicketCountRow<T>}" in the Criteria API. The grouped
+     * column is {@code NOT NULL} and mapped to the enum the caller asks for, so the cast cannot fail
+     * at runtime - only the two literal call sites above choose the property, and each pairs it with
+     * the matching enum.
+     */
+    @SuppressWarnings("unchecked")
+    private <T> List<TicketCountRow<T>> countGroupedBy(String property,
+                                                       boolean unsettledOnly,
+                                                       Long restrictToUserId) {
+        CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+        CriteriaQuery<TicketCountRow> query = cb.createQuery(TicketCountRow.class);
+        Root<Ticket> ticket = query.from(Ticket.class);
+
+        Path<T> grouped = ticket.get(property);
+        query.select(cb.construct(TicketCountRow.class, grouped, cb.count(ticket)));
+        query.groupBy(grouped);
+
+        Predicate extra = unsettledOnly
+                ? cb.not(ticket.get("status").in(TicketStatus.settled()))
+                : null;
+        applyVisibility(cb, query, ticket, restrictToUserId, extra);
+
+        List<TicketCountRow> rows = entityManager.createQuery(query).getResultList();
+        return (List<TicketCountRow<T>>) (List<?>) rows;
+    }
+
+    /** {@code count(case when <condition> then 1 end)} - see the note in {@link #findTicketStats}. */
+    private Expression<Long> countWhere(CriteriaBuilder cb, Predicate condition) {
+        return cb.count(cb.selectCase().when(condition, 1).otherwise(cb.nullLiteral(Integer.class)));
+    }
+
+    /**
+     * Applies the authorization boundary, and any extra predicate, to a statistics query.
+     *
+     * <p>Identical in meaning to the {@code restrictToUserId} block in {@link #fetchRows} - and
+     * written once here rather than copied into three query builders, because an authorization
+     * predicate that exists in four places is one that eventually gets left out of the fourth.
+     */
+    private void applyVisibility(CriteriaBuilder cb,
+                                 CriteriaQuery<?> query,
+                                 Root<Ticket> ticket,
+                                 Long restrictToUserId,
+                                 Predicate... extra) {
+        List<Predicate> predicates = new ArrayList<>();
+        for (Predicate predicate : extra) {
+            if (predicate != null) {
+                predicates.add(predicate);
+            }
+        }
+        if (restrictToUserId != null) {
+            predicates.add(cb.or(
+                    cb.equal(ticket.get("raisedBy").get("id"), restrictToUserId),
+                    cb.equal(ticket.get("assignedTo").get("id"), restrictToUserId)));
+        }
+        if (!predicates.isEmpty()) {
+            query.where(cb.and(predicates.toArray(Predicate[]::new)));
+        }
     }
 
     private List<TicketRow> fetchRows(TicketFilter filter, Pageable pageable, Long restrictToUserId) {
@@ -170,7 +317,65 @@ public class TicketQueryRepositoryImpl implements TicketQueryRepository {
         if (filter.raisedByUserId() != null) {
             predicates.add(cb.equal(ticket.get("raisedBy").get("id"), filter.raisedByUserId()));
         }
+        if (filter.q() != null) {
+            predicates.add(freeText(cb, ticket, filter.q()));
+        }
         return predicates;
+    }
+
+    /**
+     * {@code lower(col) like '%term%'} across the three columns a reader would search by.
+     *
+     * <p><strong>Which columns, and why only these three.</strong> {@code ticket_number} is how a
+     * ticket is referred to in an email or a corridor; {@code title} is how it is recognised;
+     * {@code description} is where the detail that was not in the title ended up. The joined columns
+     * are deliberately excluded - searching the raiser's and assignee's names would turn this into a
+     * three-way join on a query that already cannot use an index, and "tickets involving a person" is
+     * what {@code assignedTo} and {@code raisedBy} already answer exactly.
+     *
+     * <p>All three are {@code NOT NULL}, so the {@code OR} cannot be short-circuited by a NULL
+     * comparison and no {@code coalesce} is needed.
+     *
+     * <p><strong>Case folding happens twice, on purpose.</strong> {@code lower()} in SQL for the
+     * column and {@code Locale.ROOT} in Java for the term. {@code ROOT} rather than the default locale
+     * because {@code String.toLowerCase()} is locale-sensitive in exactly the way that bites here: in a
+     * Turkish locale {@code "I"} lowercases to a dotless {@code "ı"}, which would then match nothing
+     * the database produced - a server searching for different text depending on its own
+     * {@code -Duser.language}.
+     */
+    private Predicate freeText(CriteriaBuilder cb, Root<Ticket> ticket, String term) {
+        String pattern = "%" + escapeLikePattern(term.toLowerCase(Locale.ROOT)) + "%";
+
+        return cb.or(
+                cb.like(cb.lower(ticket.get("ticketNumber")), pattern, LIKE_ESCAPE),
+                cb.like(cb.lower(ticket.get("title")), pattern, LIKE_ESCAPE),
+                cb.like(cb.lower(ticket.get("description")), pattern, LIKE_ESCAPE));
+    }
+
+    /**
+     * Escapes the characters {@code LIKE} treats as wildcards, so that a search term is matched as the
+     * literal text somebody typed.
+     *
+     * <p>Without this, {@code %} and {@code _} typed into a search box are operators rather than
+     * characters. A lone {@code %} matches every ticket, which looks like the filter being ignored; and
+     * {@code TKT_1} silently matches {@code TKT-1}, {@code TKTx1} and anything else of that shape, so
+     * a ticket-number search returns rows that are not the ticket. The parameter is still bound, so
+     * this is not an injection defence - it is the difference between searching for text and
+     * accidentally handing the user a pattern language.
+     *
+     * <p>The escape character escapes itself, which is why a literal backslash in the term is doubled:
+     * leaving it alone would consume the character after it.
+     */
+    private String escapeLikePattern(String term) {
+        StringBuilder escaped = new StringBuilder(term.length() + 8);
+        for (int index = 0; index < term.length(); index++) {
+            char character = term.charAt(index);
+            if (character == '%' || character == '_' || character == LIKE_ESCAPE) {
+                escaped.append(LIKE_ESCAPE);
+            }
+            escaped.append(character);
+        }
+        return escaped.toString();
     }
 
     /**
