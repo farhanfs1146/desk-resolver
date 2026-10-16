@@ -40,7 +40,7 @@ class TicketLifecycleIT extends AbstractPostgresIT {
                  "description":"Net pay miscalculated for March",
                  "issueType":"BUG",
                  "priority":"%s",
-                 "businessImpact":"Department",
+                 "businessImpact":"DEPARTMENT",
                  "applicationId":%d,
                  "moduleName":"Salary"}""".formatted(priority, applicationId);
     }

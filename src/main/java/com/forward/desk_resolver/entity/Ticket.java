@@ -1,5 +1,6 @@
 package com.forward.desk_resolver.entity;
 
+import com.forward.desk_resolver.enums.BusinessImpact;
 import com.forward.desk_resolver.enums.IssueType;
 import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
@@ -52,8 +53,16 @@ public class Ticket {
     @Column(name = "status", nullable = false, length = 50)
     private TicketStatus status;
 
+    /**
+     * How widely the problem is felt - see {@link BusinessImpact}, which also records why this
+     * stopped being 50 characters of free text.
+     *
+     * <p>Nullable, and stays that way: impact was always optional, and an absent one means the
+     * requester did not say rather than that nothing is affected.
+     */
+    @Enumerated(EnumType.STRING)
     @Column(name = "business_impact", length = 50)
-    private String businessImpact;
+    private BusinessImpact businessImpact;
 
     /**
      * Ticket timestamps are absolute instants, not wall-clock times.

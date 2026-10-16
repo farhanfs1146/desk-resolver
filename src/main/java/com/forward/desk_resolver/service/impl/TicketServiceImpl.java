@@ -12,6 +12,7 @@ import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.TicketHistoryTracking;
 import com.forward.desk_resolver.entity.User;
+import com.forward.desk_resolver.enums.BusinessImpact;
 import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.repository.ApplicationRepository;
@@ -607,6 +608,18 @@ public class TicketServiceImpl implements TicketService {
     }
 
     /**
+     * The impact's name, or null.
+     *
+     * <p>Written out rather than inlined twice because it is the one enum on this response that is
+     * nullable - {@code issueType}, {@code priority} and {@code status} are all NOT NULL, so they
+     * call {@code .name()} directly. A bare {@code .name()} here would be a NullPointerException on
+     * every ticket whose requester did not state an impact, which is most of them.
+     */
+    private static String impactName(BusinessImpact impact) {
+        return impact == null ? null : impact.name();
+    }
+
+    /**
      * Maps a read projection to the response DTO.
      *
      * <p>The DTO's field names and types are unchanged - only where the data comes from has changed.
@@ -620,7 +633,7 @@ public class TicketServiceImpl implements TicketService {
                 .issueType(row.issueType().name())
                 .priority(row.priority().name())
                 .status(row.status().name())
-                .businessImpact(row.businessImpact())
+                .businessImpact(impactName(row.businessImpact()))
                 .expectedBy(row.expectedBy())
                 .createdAt(row.createdAt())
                 .updatedAt(row.updatedAt())
@@ -648,7 +661,7 @@ public class TicketServiceImpl implements TicketService {
                 .issueType(ticket.getIssueType().name())
                 .priority(ticket.getPriority().name())
                 .status(ticket.getStatus().name())
-                .businessImpact(ticket.getBusinessImpact())
+                .businessImpact(impactName(ticket.getBusinessImpact()))
                 .expectedBy(ticket.getExpectedBy())
                 .createdAt(ticket.getCreatedAt())
                 .updatedAt(ticket.getUpdatedAt())

@@ -1,5 +1,6 @@
 package com.forward.desk_resolver.repository.projection;
 
+import com.forward.desk_resolver.enums.BusinessImpact;
 import com.forward.desk_resolver.enums.IssueType;
 import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
@@ -35,7 +36,7 @@ public record TicketRow(
         IssueType issueType,
         Priority priority,
         TicketStatus status,
-        String businessImpact,
+        BusinessImpact businessImpact,
         Instant expectedBy,
         Instant createdAt,
         Instant updatedAt,

@@ -40,6 +40,10 @@ public class TicketResponse {
     private String issueType;
     private String priority;
     private String status;
+    @Schema(description = "How far the problem reaches, or null if the requester did not say: "
+            + "SINGLE_USER, TEAM, DEPARTMENT, MULTIPLE_DEPARTMENTS or COMPANY_WIDE. Was free text "
+            + "until V23.",
+            example = "DEPARTMENT")
     private String businessImpact;
 
     @Schema(description = "When the requester needs this resolved by. ISO-8601 instant, UTC.")
