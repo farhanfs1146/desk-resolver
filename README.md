@@ -202,6 +202,7 @@ produced inside the security filter chain.
 | `POST` | `/api/auth/logout` | authenticated |
 | `POST` | `/api/tickets` | `TICKET_CREATE` |
 | `GET` | `/api/tickets` | `TICKET_READ_OWN` |
+| `GET` | `/api/tickets/stats` | `TICKET_READ_OWN` |
 | `GET` | `/api/tickets/{id}` | `TICKET_READ_OWN` |
 | `GET` | `/api/tickets/{id}/history` | `TICKET_READ_OWN` |
 | `PUT` | `/api/tickets/{ticketId}/assign/{userId}` | `TICKET_ASSIGN` |
@@ -298,6 +299,104 @@ curl -X POST http://localhost:9211/api/tickets/1/attachments \
 Bytes live on disk under `APP_ATTACHMENT_DIR`, not in the database. One consequence is worth knowing:
 that directory is **per-instance**, so a horizontally scaled deployment needs shared storage or a new
 `AttachmentStorage` implementation. See [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
+
+### Aggregate counts
+
+`GET /api/tickets/stats` answers every figure a dashboard needs in one request.
+
+| Field | Counts |
+| --- | --- |
+| `total` | every ticket the caller may see, any status |
+| `open` | not `RESOLVED` and not `CLOSED` |
+| `overdue` | past `expectedBy` and still open — no deadline means it cannot be overdue |
+| `unassigned` | open with no assignee |
+| `assignedToMe` | open and assigned to the caller |
+| `raisedByMe` | raised by the caller, **any** status |
+| `byStatus` | count per status |
+| `byPriority` | count per priority, over **open** work only |
+| `scopedToMe` | whether these numbers cover every ticket or only the caller's own |
+
+**Why an endpoint rather than letting the client count.** Every one of those numbers was obtainable
+from `GET /api/tickets` already — one request per status, one per priority, three more for the
+scalars, reading `X-Total-Count` off each. That is fourteen round trips to render one screen, each
+paying the authorization restriction again, and the fourteen answers are not a consistent snapshot of
+anything: a headline figure and the chart beside it described different states of the database
+whenever something changed mid-load. This is three queries in one transaction.
+
+**Three queries, split by shape rather than by convenience.** One conditional aggregation
+(`count(case when ... then 1 end)`) for the scalars, and one `group by` each for the two breakdowns.
+The breakdowns cannot be folded into the scalar query — a row cannot be grouped two ways at once —
+and splitting the scalars apart would scan the same rows four times to answer four questions about
+them. None of the three joins anything: every predicate compares a column on `tickets` itself,
+including the association ids, which is what keeps the V12 indexes reachable.
+
+**Counts respect visibility exactly as the list does.** A caller without `TICKET_READ_ALL` gets
+counts over the tickets they raised or are assigned to, with the restriction ANDed into the SQL — so
+this endpoint cannot be used to learn the size of the table. `scopedToMe` says which of the two
+happened, because the difference changes what the numbers mean and **a client should word its
+headings from that flag, not from the permissions it was issued**.
+
+**No new permission was introduced**, deliberately. One would have had to be added to `Permission`,
+to `auth.permissions` in a migration, and granted to every role already holding a ticket-read
+permission — a lot of moving parts to express "may read counts of the tickets you may already read",
+which is not a separate capability. `TICKET_READ_OWN` is the same floor the list asserts.
+
+**Both maps carry an entry for every constant, zero included**, so a client can render a complete
+breakdown without its own copy of the enum — `group by` returns only the groups that exist, and the
+service fills the gaps. `byPriority` covers open work only: a year of closed criticals says nothing
+about today's urgency.
+
+One figure is worth reading twice. `unassigned` is always 0 for a caller who only sees their own
+tickets, and that is correct rather than broken — a ticket they raised is visible to them whether or
+not it has an assignee, so the number is a triage figure that only means something with
+`TICKET_READ_ALL`.
+
+`TicketStatsIT` covers the arithmetic — each count's exclusions, each of which is a line of SQL that
+can be dropped without anything failing — and the authorization boundary: six tickets exist, a
+requester involved in two sees two.
+
+### Impact is a value, not a sentence
+
+`businessImpact` on a ticket is one of five constants, ascending:
+
+| | Means |
+| --- | --- |
+| `SINGLE_USER` | one person cannot get on with their work |
+| `TEAM` | a team or a shift |
+| `DEPARTMENT` | a whole department or business function |
+| `MULTIPLE_DEPARTMENTS` | more than one of them, but not everybody |
+| `COMPANY_WIDE` | everyone, or a shared system everyone depends on |
+
+**It describes scope, not urgency.** How soon a ticket needs fixing is `priority`; how many people it
+affects is this. Together they are the impact-and-urgency pair a desk triages on, which is the whole
+reason for having both — an impact scale of LOW/MEDIUM/HIGH would have been a second priority field
+under another name, and the two would have disagreed with each other inside a week.
+
+It is **optional**, and converting it did not change that. An absent impact means the requester did
+not say, which is not the same claim as `SINGLE_USER` — so there is no `NONE` constant and no
+default.
+
+**This was a breaking input change.** Until `V23` the column was 50 characters of free text with a
+placeholder suggesting "Department-level". Four tickets existed at the time, all meaning the same
+thing, spelled two ways: `Organization-Level` twice and `Organization Level` twice. Nothing was wrong
+with either — the field simply could not be counted, filtered or grouped, which is the only reason to
+record impact at all. Two spellings in four rows is what free text does at any scale; a bigger table
+only takes longer to show it. Those values are now **400s**, and so is the right constant in the
+wrong case, because Jackson matches enum names exactly. `BusinessImpactIT` is the file that says so
+out loud.
+
+**`V23` refuses to run rather than discard what somebody wrote.** Its mapping is generous — it reads
+"organisation", "company", "department", "division", "team", "shift", "user" and more, widest match
+first, with `MULTIPLE_DEPARTMENTS` needing both a count word and a department word — but it cannot be
+exhaustive, because it is matching prose. Anything it does not recognise raises an exception naming
+the values, and since Flyway runs each migration in a transaction the table is left untouched: the
+deploy fails and a person decides what those tickets meant. Verified against the database it was
+written for, which has zero unmapped rows.
+
+A `CHECK` constraint backs it up, because `@Enumerated(EnumType.STRING)` only guards traffic through
+the API — and a SQL console, a data fix or an import is exactly how a column grows a twenty-fifth
+spelling. The cost is that a sixth constant needs a migration to drop and re-add the constraint.
+That is the right trade.
 
 ### Filtering and search
 
@@ -458,13 +557,13 @@ endpoint.
 
 ```bash
 ./mvnw test      # 106 unit tests, no infrastructure needed, ~2s
-./mvnw verify    # the above plus 220 integration tests in a PostgreSQL container
+./mvnw verify    # the above plus 284 integration tests in a PostgreSQL container
 ```
 
 Integration tests are named `*IT` and run under failsafe, so **`mvn test` does not run them** - use
 `mvn verify` before pushing.
 
-They need Docker. Each run starts one throwaway `postgres:18-alpine` container, applies all 21
+They need Docker. Each run starts one throwaway `postgres:18-alpine` container, applies all 23
 migrations to it and lets Hibernate validate the mappings against the result, so the migrations and the
 entity mappings are themselves under test. **No test touches a local database.** Attachments are
 written to a temporary directory, so no run touches `./data/attachments` either.
@@ -498,6 +597,9 @@ so all of them are exercised against the real schema rather than a stub.
 | `TicketCommentIT` | the thread end to end, that both sides can take part, that a comment changes nothing about the ticket, chronological ordering, and that involvement - not the permission - decides whose thread you reach |
 | `TicketAttachmentIT` | upload/list/download, the three refusals, that a generated path cannot be steered by a traversal filename, that an attachment is bound to its ticket, and the row-whose-file-is-gone case |
 | `SwaggerGatingIT` | the now-default gated path, including that its 401 is a problem document. Runs in its own context, because the flag is read when the filter chain is built |
+| `TicketStatsIT` | the dashboard's arithmetic - each count's exclusions, every one of which is a line of SQL that can be dropped without anything failing - and the authorization boundary: six tickets exist, a requester involved in two sees two |
+| `TicketSearchIT` | what `?q=` matches across three columns, that `%` and `_` are matched literally rather than as wildcards, that a blank term is no filter, and that a search narrows the ownership restriction rather than escaping it |
+| `BusinessImpactIT` | `businessImpact` as a constrained value: every constant round-trips (driven from `@EnumSource`, so a new one cannot be added uncovered), it stays optional, and the free text that used to be accepted - including the two spellings that were in the table - is now a 400 |
 
 If Testcontainers cannot find Docker on Docker Desktop for Windows, point it at the active endpoint:
 `DOCKER_HOST=npipe:////./pipe/dockerDesktopLinuxEngine`.

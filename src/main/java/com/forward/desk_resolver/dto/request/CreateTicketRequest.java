@@ -1,5 +1,6 @@
 package com.forward.desk_resolver.dto.request;
 
+import com.forward.desk_resolver.enums.BusinessImpact;
 import com.forward.desk_resolver.enums.IssueType;
 import com.forward.desk_resolver.enums.Priority;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -30,9 +31,20 @@ public class CreateTicketRequest {
     @Schema(description = "Select in the drop-down whether ticket priority is low, high or critical very urgent etc.")
     private Priority priority;
 
-    @Size(max = 50, message = "Business impact must be at most 50 characters")
-    @Schema(description = "select the impact of this ticket whether it is department-level, user-level")
-    private String businessImpact;
+    /**
+     * Optional, and no longer free text - see {@link BusinessImpact}.
+     *
+     * <p>No {@code @NotNull}: it stays optional, because a requester who does not know how far a
+     * problem reaches should not be made to guess. An unset value means they did not say, which is a
+     * different thing from any of the four constants.
+     *
+     * <p>An unknown constant is a 400 naming this field, produced by Jackson before validation runs
+     * - which is why there is no {@code @Size} anymore, and nothing here to replace it.
+     */
+    @Schema(description = "How far the problem reaches: SINGLE_USER, TEAM, DEPARTMENT, "
+            + "MULTIPLE_DEPARTMENTS or COMPANY_WIDE. Optional. How soon it needs fixing is "
+            + "'priority', not this.")
+    private BusinessImpact businessImpact;
 
     /**
      * When the requester needs this resolved by, as an absolute instant.
