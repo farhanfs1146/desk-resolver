@@ -299,6 +299,43 @@ Bytes live on disk under `APP_ATTACHMENT_DIR`, not in the database. One conseque
 that directory is **per-instance**, so a horizontally scaled deployment needs shared storage or a new
 `AttachmentStorage` implementation. See [`docs/DECISIONS.md`](docs/DECISIONS.md) §5.
 
+### Filtering and search
+
+`GET /api/tickets` takes five optional filters, all ANDed together, and each one is in the API because
+something uses it rather than because it might be useful:
+
+| Parameter | Matches | Index |
+| --- | --- | --- |
+| `status` | exactly | `idx_tickets_status_created_at` serves the count |
+| `priority` | exactly | none - a dedicated one was built, measured, chosen zero times, dropped (`V12`) |
+| `assignedTo` | the assignee's user id | `idx_tickets_assigned_to_created_at` |
+| `raisedBy` | the raiser's user id | `idx_tickets_raised_by_created_at` |
+| `q` | free text, see below | **none, deliberately** |
+
+`q` is a case-insensitive substring match over `ticket_number`, `title` and `description`. Three
+properties of it are worth knowing:
+
+- **`%` and `_` are escaped.** They are LIKE's wildcards, and a search box hands them straight to it.
+  Unescaped, a lone `%` returns every ticket - which reads as the filter being ignored - and `TKT_1`
+  would quietly match `TKT-1`. `TicketSearchIT` has the tests that fail if the `ESCAPE` clause is ever
+  removed as redundant.
+- **Blank means absent.** `?q=` and `?q=%20%20` are what a search box sends when nobody is searching,
+  and `TicketFilter`'s constructor normalises both to no filter rather than to `LIKE '%%'`.
+- **It cannot widen visibility.** Like the rest of the list, it is ANDed with the ownership
+  restriction, so a caller without `TICKET_READ_ALL` cannot search their way to a ticket they could
+  not already open.
+
+**There is no index for `q`, and that is a decision.** A leading wildcard leaves a B-tree nothing to
+seek on, so a search reads the rows it filters. The fix would be `pg_trgm` plus a GIN index per
+searched column - but every index in `V12` earned its place by being measured, and `V12`'s fifth
+candidate was deleted for failing the same test. No equivalent measurement exists here: there is no
+production table, and a seeded one would answer a question about invented data. The recipe for
+settling it with numbers is written out on `TicketQueryRepository#findTicketRows`.
+
+Searching is a **parameter on the list**, not a `/search` endpoint. A separate endpoint would have
+grown its own paging, sorting, filters and - the part that matters - its own copy of the ownership
+restriction, and a search that forgets that restriction is a way to read other people's tickets.
+
 ### Pagination
 
 Every collection endpoint is paged: `?page=` (zero-based), `?size=` (default 20, capped at 100),
@@ -515,3 +552,6 @@ reuse detection and the one thing a client must not get wrong.
 - **`users.department_id` / `designation_id`** reference tables that do not exist, which is why
   `MANAGER`, `HOD` and `DIRECTOR` have no department-scoped visibility.
 - **Offset pagination is O(offset)** on deep pages; keyset pagination would be a contract change.
+- **Free-text search is unindexed.** `?q=` on the ticket list reads the rows it filters, because a
+  substring match cannot use a B-tree. Documented rather than fixed: see **Filtering and search** for
+  why, and for the measurement that would decide it.

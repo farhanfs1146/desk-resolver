@@ -7,18 +7,22 @@ import com.forward.desk_resolver.dto.request.CreateTicketRequest;
 import com.forward.desk_resolver.dto.request.TicketFilter;
 import com.forward.desk_resolver.dto.response.TicketHistoryResponse;
 import com.forward.desk_resolver.dto.response.TicketResponse;
+import com.forward.desk_resolver.dto.response.TicketStatsResponse;
 import com.forward.desk_resolver.entity.Application;
 import com.forward.desk_resolver.entity.Ticket;
 import com.forward.desk_resolver.entity.TicketHistoryTracking;
 import com.forward.desk_resolver.entity.User;
+import com.forward.desk_resolver.enums.Priority;
 import com.forward.desk_resolver.enums.TicketStatus;
 import com.forward.desk_resolver.repository.ApplicationRepository;
 import com.forward.desk_resolver.repository.TicketHistoryTrackingRepository;
 import com.forward.desk_resolver.repository.TicketRepository;
 import com.forward.desk_resolver.repository.UserRepository;
 import com.forward.desk_resolver.repository.UserRoleRepository;
+import com.forward.desk_resolver.repository.projection.TicketCountRow;
 import com.forward.desk_resolver.repository.projection.TicketHistoryRow;
 import com.forward.desk_resolver.repository.projection.TicketRow;
+import com.forward.desk_resolver.repository.projection.TicketStatsRow;
 import com.forward.desk_resolver.security.Permission;
 import com.forward.desk_resolver.service.TicketService;
 import com.forward.desk_resolver.util.TicketNumberGenerator;
@@ -32,6 +36,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 
 @Service
@@ -318,6 +325,78 @@ public class TicketServiceImpl implements TicketService {
 
         return ticketHistoryTrackingRepository.findHistoryRows(ticketId, pageable)
                 .map(TicketServiceImpl::mapHistoryRow);
+    }
+
+    /**
+     * Aggregate counts for the dashboard (see {@link TicketService#getTicketStats}).
+     *
+     * <p>The visibility decision is made here and in exactly the same shape as in
+     * {@link #searchTickets}, which is deliberate: both are the collection half of the IDOR boundary,
+     * and reading the permission in one place and not the other is how a reporting endpoint ends up
+     * being the way round a row-level rule.
+     *
+     * <p>{@code requireCurrentUserId()} is called unconditionally, unlike in {@code searchTickets}
+     * where it is only needed for the restriction. The two "mine" counts are about a person whether
+     * or not that person can see everything, so support staff need the id too.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public TicketStatsResponse getTicketStats() {
+        boolean seesEveryTicket = currentUserProvider.hasPermission(Permission.TICKET_READ_ALL);
+        Long currentUserId = currentUserProvider.requireCurrentUserId();
+        Long restrictToUserId = seesEveryTicket ? null : currentUserId;
+
+        List<TicketCountRow<TicketStatus>> statusCounts =
+                ticketRepository.countTicketsByStatus(restrictToUserId);
+        List<TicketCountRow<Priority>> priorityCounts =
+                ticketRepository.countOpenTicketsByPriority(restrictToUserId);
+        TicketStatsRow scalars = ticketRepository.findTicketStats(now(), currentUserId, restrictToUserId);
+
+        // Derived from the breakdown rather than queried, so the headline figures and the chart beside
+        // them are summaries of one set of rows and cannot disagree about it.
+        long total = 0;
+        long open = 0;
+        for (TicketCountRow<TicketStatus> row : statusCounts) {
+            total += row.count();
+            if (!row.value().isSettled()) {
+                open += row.count();
+            }
+        }
+
+        return TicketStatsResponse.builder()
+                .total(total)
+                .open(open)
+                .overdue(scalars.overdue())
+                .unassigned(scalars.unassigned())
+                .assignedToMe(scalars.assignedToMe())
+                .raisedByMe(scalars.raisedByMe())
+                .byStatus(withEveryKey(TicketStatus.values(), statusCounts))
+                .byPriority(withEveryKey(Priority.values(), priorityCounts))
+                .scopedToMe(!seesEveryTicket)
+                .build();
+    }
+
+    /**
+     * Turns {@code group by} rows into a map that has an entry for every constant the enum defines.
+     *
+     * <p>The zero-filling is the point. {@code group by} returns only groups that exist, so a status
+     * no ticket currently holds would simply be absent - and a client rendering a breakdown from the
+     * response would then show a different number of bars depending on the data, or would have to
+     * carry its own copy of the enum to know what was missing. Enum declaration order is preserved by
+     * the {@link LinkedHashMap}, so the response lists the statuses in the order the API defines them
+     * rather than in whatever order PostgreSQL grouped them.
+     */
+    private static <E extends Enum<E>> Map<String, Long> withEveryKey(
+            E[] constants, List<TicketCountRow<E>> counts) {
+
+        Map<String, Long> byName = new LinkedHashMap<>();
+        for (E constant : constants) {
+            byName.put(constant.name(), 0L);
+        }
+        for (TicketCountRow<E> row : counts) {
+            byName.put(row.value().name(), row.count());
+        }
+        return byName;
     }
 
     private static TicketHistoryResponse mapHistoryRow(TicketHistoryRow row) {
